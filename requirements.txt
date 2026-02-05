@@ -1,0 +1,34 @@
+# Python dependencies for ScoutBase Vision Pipeline
+# Install with: pip install -r requirements.txt
+
+# Core ML / Vision
+ultralytics>=8.0.0       # YOLOv8/v11 model inference
+supervision>=0.18.0      # Detection + annotation utilities
+opencv-python>=4.8.0     # Video I/O
+
+# Tracking
+# Note: 'trackers' is the ByteTrack Python package
+# Install separately: pip install roboflow-trackers
+# Or use: pip install git+https://github.com/roboflow/trackers.git
+
+# API Server
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-multipart>=0.0.6  # File uploads
+
+# Optional: Database
+supabase>=2.0.0
+
+# Optional: AI Report Generation
+google-generativeai>=0.3.0
+anthropic>=0.18.0
+
+# Data
+numpy>=1.24.0
+
+# SAM3 (Segment Anything Model) - Optional enhancement
+# Requires: pip install torch torchvision first (with CUDA for GPU support)
+# Then request HuggingFace access at: https://huggingface.co/facebook/sam2.1-hiera-base-plus
+transformers>=4.38.0
+huggingface-hub>=0.20.0
+safetensors>=0.4.0
