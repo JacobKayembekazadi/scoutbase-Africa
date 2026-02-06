@@ -12,6 +12,11 @@ Or with auto-reload for development:
 """
 
 import os
+
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 import uuid
 import json
 import asyncio
@@ -468,6 +473,100 @@ async def get_annotated_video(job_id: str):
         media_type="video/mp4",
         filename=f"scoutbase_tracked_{job_id}.mp4",
     )
+
+
+@app.get("/results/{job_id}/frame/{frame_number}")
+async def get_video_frame(job_id: str, frame_number: int):
+    """Extract and return a single frame from the video as JPEG image."""
+    import cv2
+    import io
+    from fastapi.responses import StreamingResponse
+
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+
+    job = jobs[job_id]
+    if job["status"] != "completed":
+        raise HTTPException(400, "Processing not yet complete")
+
+    # Try annotated video first, fall back to original
+    video_path = Path(job["results_path"]) / "annotated_output.mp4"
+    if not video_path.exists():
+        # Try to find original upload
+        uploads_dir = Path("uploads")
+        video_files = list(uploads_dir.glob(f"{job_id}_*"))
+        if video_files:
+            video_path = video_files[0]
+        else:
+            raise HTTPException(404, "Video file not found")
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise HTTPException(500, "Failed to open video file")
+
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if frame_number < 0 or frame_number >= total_frames:
+            raise HTTPException(400, f"Frame number must be between 0 and {total_frames - 1}")
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        ret, frame = cap.read()
+        if not ret:
+            raise HTTPException(500, f"Failed to read frame {frame_number}")
+
+        # Encode as JPEG
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+        return StreamingResponse(
+            io.BytesIO(buffer.tobytes()),
+            media_type="image/jpeg",
+            headers={"Content-Disposition": f"inline; filename=frame_{frame_number}.jpg"}
+        )
+    finally:
+        cap.release()
+
+
+@app.get("/results/{job_id}/info")
+async def get_video_info(job_id: str):
+    """Get video metadata including total frames, fps, and duration."""
+    import cv2
+
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+
+    job = jobs[job_id]
+    if job["status"] != "completed":
+        raise HTTPException(400, "Processing not yet complete")
+
+    video_path = Path(job["results_path"]) / "annotated_output.mp4"
+    if not video_path.exists():
+        uploads_dir = Path("uploads")
+        video_files = list(uploads_dir.glob(f"{job_id}_*"))
+        if video_files:
+            video_path = video_files[0]
+        else:
+            raise HTTPException(404, "Video file not found")
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise HTTPException(500, "Failed to open video file")
+
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        duration = total_frames / fps if fps > 0 else 0
+
+        return {
+            "total_frames": total_frames,
+            "fps": round(fps, 2),
+            "width": width,
+            "height": height,
+            "duration_seconds": round(duration, 2),
+        }
+    finally:
+        cap.release()
 
 
 @app.get("/results/{job_id}/csv")

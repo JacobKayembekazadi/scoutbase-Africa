@@ -197,7 +197,10 @@ class SAM3Processor:
 
     def segment_frame(self, request: SegmentationRequest) -> SegmentationResponse:
         """
-        Perform text-prompted segmentation on a single frame.
+        Perform text-prompted segmentation on a single frame using SAM3.
+
+        SAM3 supports text prompts like "yellow school bus", "football player",
+        "person in blue jersey", etc.
 
         Args:
             request: Segmentation request with image and prompt
@@ -215,12 +218,19 @@ class SAM3Processor:
             image = self._decode_image(request)
             h, w = image.shape[:2]
 
-            # Prepare inputs
+            # Convert numpy array to PIL Image for SAM3
+            from PIL import Image as PILImage
+            if isinstance(image, np.ndarray):
+                pil_image = PILImage.fromarray(image)
+            else:
+                pil_image = image
+
+            # Prepare inputs using SAM3 API with text prompt
             import torch
 
             inputs = processor(
-                images=image,
-                input_text=request.prompt,
+                images=pil_image,
+                text=request.prompt,  # SAM3 uses 'text' parameter for text prompts
                 return_tensors="pt",
             ).to(self.model_loader.device)
 
@@ -228,59 +238,70 @@ class SAM3Processor:
             with torch.no_grad():
                 outputs = model(**inputs)
 
-            # Process outputs
-            # Note: Actual output processing depends on the specific SAM2/3 API
-            # This is a placeholder that would need adjustment for the real model
-            masks = outputs.pred_masks if hasattr(outputs, 'pred_masks') else None
-            scores = outputs.iou_scores if hasattr(outputs, 'iou_scores') else None
+            # Post-process using SAM3's post_process_instance_segmentation
+            results = processor.post_process_instance_segmentation(
+                outputs,
+                threshold=request.confidence_threshold,
+                mask_threshold=0.5,
+                target_sizes=inputs.get("original_sizes").tolist() if inputs.get("original_sizes") is not None else [[h, w]]
+            )[0]  # Get first (and only) image result
 
             objects = []
 
-            if masks is not None:
-                # Convert masks to numpy
-                masks_np = masks.cpu().numpy()
-                scores_np = scores.cpu().numpy() if scores is not None else None
+            # Extract masks, boxes, and scores from results
+            masks = results.get('masks', [])
+            boxes = results.get('boxes', [])
+            scores = results.get('scores', [])
 
-                for i in range(masks_np.shape[0]):
-                    mask = masks_np[i] > 0.5
-                    score = float(scores_np[i]) if scores_np is not None else 0.5
+            for i in range(len(masks)):
+                mask = masks[i].cpu().numpy() if hasattr(masks[i], 'cpu') else np.array(masks[i])
+                score = float(scores[i]) if i < len(scores) else 0.5
 
-                    if score < request.confidence_threshold:
-                        continue
+                if score < request.confidence_threshold:
+                    continue
 
-                    # Calculate properties
-                    area = int(np.sum(mask))
-                    if area == 0:
-                        continue
+                # Calculate properties
+                area = int(np.sum(mask))
+                if area == 0:
+                    continue
 
-                    # Centroid
-                    y_coords, x_coords = np.where(mask)
-                    centroid = [float(np.mean(x_coords)), float(np.mean(y_coords))]
+                # Centroid
+                y_coords, x_coords = np.where(mask)
+                if len(x_coords) == 0 or len(y_coords) == 0:
+                    continue
+                centroid = [float(np.mean(x_coords)), float(np.mean(y_coords))]
 
-                    # Bounding box
-                    bbox = None
-                    if request.return_bboxes:
+                # Bounding box from results or calculate from mask
+                bbox = None
+                if request.return_bboxes:
+                    if i < len(boxes):
+                        box = boxes[i]
+                        if hasattr(box, 'cpu'):
+                            box = box.cpu().numpy()
+                        bbox = [float(box[0]), float(box[1]), float(box[2]), float(box[3])]
+                    else:
                         x1, y1 = float(np.min(x_coords)), float(np.min(y_coords))
                         x2, y2 = float(np.max(x_coords)), float(np.max(y_coords))
                         bbox = [x1, y1, x2, y2]
 
-                    # Mask RLE
-                    mask_rle = None
-                    if request.return_masks:
-                        mask_rle = self._mask_to_rle(mask.astype(np.uint8))
+                # Mask RLE
+                mask_rle = None
+                if request.return_masks:
+                    mask_rle = self._mask_to_rle(mask.astype(np.uint8))
 
-                    # Dominant color
-                    dominant_color = self._get_dominant_color(image, mask)
+                # Dominant color - use numpy array image
+                image_np = np.array(pil_image) if not isinstance(image, np.ndarray) else image
+                dominant_color = self._get_dominant_color(image_np, mask)
 
-                    objects.append(SegmentedObject(
-                        id=i,
-                        confidence=score,
-                        bbox=bbox,
-                        mask_rle=mask_rle,
-                        area=area,
-                        centroid=centroid,
-                        dominant_color=dominant_color,
-                    ))
+                objects.append(SegmentedObject(
+                    id=i,
+                    confidence=score,
+                    bbox=bbox,
+                    mask_rle=mask_rle,
+                    area=area,
+                    centroid=centroid,
+                    dominant_color=dominant_color,
+                ))
 
             processing_time = (time.time() - start_time) * 1000
 
@@ -402,7 +423,7 @@ class SAM3Processor:
         image: np.ndarray,
         request: SegmentationRequest
     ) -> SegmentationResponse:
-        """Segment a numpy array directly (internal helper)."""
+        """Segment a numpy array directly (internal helper) using SAM3."""
         start_time = time.time()
 
         try:
@@ -410,19 +431,74 @@ class SAM3Processor:
 
             h, w = image.shape[:2]
 
+            # Convert numpy array to PIL Image for SAM3
+            from PIL import Image as PILImage
+            pil_image = PILImage.fromarray(image)
+
             import torch
 
             inputs = processor(
-                images=image,
-                input_text=request.prompt,
+                images=pil_image,
+                text=request.prompt,  # SAM3 uses 'text' parameter
                 return_tensors="pt",
             ).to(self.model_loader.device)
 
             with torch.no_grad():
                 outputs = model(**inputs)
 
-            # Process outputs (placeholder - adjust for actual SAM2/3 API)
+            # Post-process using SAM3's post_process_instance_segmentation
+            results = processor.post_process_instance_segmentation(
+                outputs,
+                threshold=request.confidence_threshold,
+                mask_threshold=0.5,
+                target_sizes=inputs.get("original_sizes").tolist() if inputs.get("original_sizes") is not None else [[h, w]]
+            )[0]
+
             objects = []
+
+            # Extract masks, boxes, and scores from results
+            masks = results.get('masks', [])
+            boxes = results.get('boxes', [])
+            scores = results.get('scores', [])
+
+            for i in range(len(masks)):
+                mask = masks[i].cpu().numpy() if hasattr(masks[i], 'cpu') else np.array(masks[i])
+                score = float(scores[i]) if i < len(scores) else 0.5
+
+                if score < request.confidence_threshold:
+                    continue
+
+                area = int(np.sum(mask))
+                if area == 0:
+                    continue
+
+                y_coords, x_coords = np.where(mask)
+                if len(x_coords) == 0:
+                    continue
+                centroid = [float(np.mean(x_coords)), float(np.mean(y_coords))]
+
+                bbox = None
+                if request.return_bboxes and i < len(boxes):
+                    box = boxes[i]
+                    if hasattr(box, 'cpu'):
+                        box = box.cpu().numpy()
+                    bbox = [float(box[0]), float(box[1]), float(box[2]), float(box[3])]
+
+                mask_rle = None
+                if request.return_masks:
+                    mask_rle = self._mask_to_rle(mask.astype(np.uint8))
+
+                dominant_color = self._get_dominant_color(image, mask)
+
+                objects.append(SegmentedObject(
+                    id=i,
+                    confidence=score,
+                    bbox=bbox,
+                    mask_rle=mask_rle,
+                    area=area,
+                    centroid=centroid,
+                    dominant_color=dominant_color,
+                ))
 
             processing_time = (time.time() - start_time) * 1000
 

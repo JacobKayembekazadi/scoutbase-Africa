@@ -400,3 +400,31 @@ export async function sam3EnhanceTracks(
     });
     return handleResponse<EnhanceTracksResponse>(response);
 }
+
+// ---------------------------------------------------------------------------
+// Video Frame API (for SAM3 visualization)
+// ---------------------------------------------------------------------------
+
+export interface VideoInfo {
+    total_frames: number;
+    fps: number;
+    width: number;
+    height: number;
+    duration_seconds: number;
+}
+
+/**
+ * Get video metadata including total frames, fps, and dimensions.
+ */
+export async function getVideoInfo(jobId: string): Promise<VideoInfo> {
+    const response = await fetch(`${API_BASE}/results/${jobId}/info`);
+    return handleResponse<VideoInfo>(response);
+}
+
+/**
+ * Get the URL for a specific video frame as JPEG.
+ * Use this to display frame previews in the UI.
+ */
+export function getVideoFrameUrl(jobId: string, frameNumber: number): string {
+    return `${API_BASE}/results/${jobId}/frame/${frameNumber}`;
+}

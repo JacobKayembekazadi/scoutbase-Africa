@@ -8,6 +8,7 @@ import { PlayerRow } from '@/components/PlayerRow';
 import { PlayerProfile } from '@/components/PlayerProfile';
 import { VideoUpload } from '@/components/VideoUpload';
 import { ComparisonView } from '@/components/ComparisonView';
+import { SAM3Panel } from '@/components/SAM3Panel';
 import {
   getPlayers,
   getLeagues,
@@ -290,6 +291,8 @@ export default function Home() {
             <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>Upload Match Video</h1>
             <VideoUpload />
           </div>
+        ) : sidebarSection === "sam3" ? (
+          <SAM3Panel />
         ) : !loading && !error && sidebarSection === "compare" ? (
           <div>
             <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>Player Comparison</h1>

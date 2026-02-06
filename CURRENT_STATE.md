@@ -5,7 +5,7 @@
 
 **Last Updated**: 2026-02-05
 **Updated By**: Claude (Opus 4.5)
-**Session Focus**: SAM3 Integration + Documentation
+**Session Focus**: SAM3 Video Frame Analysis Support
 
 ---
 
@@ -16,8 +16,8 @@
 | YOLO Detection | Working | 100% | Production ready |
 | ByteTrack Tracking | Working | 100% | Production ready |
 | FastAPI Server | Working | 100% | All endpoints functional |
-| SAM3 Integration | Complete | 100% | Just implemented |
-| Web Dashboard | Working | 90% | Needs SAM3 UI components |
+| SAM3 Integration | Working | 100% | Tested with HF token |
+| Web Dashboard | Working | 100% | SAM3 Panel added |
 | Player Management | Working | 100% | CRUD + assignments |
 | Documentation | Complete | 100% | BMAD + Context Engineering |
 
@@ -46,6 +46,10 @@
 - [x] `POST /sam3/teams` - Team segmentation by jersey color
 - [x] `POST /sam3/enhance/{job_id}/tracks` - ByteTrack enhancement
 
+### Video Frame API (NEW - 2026-02-05)
+- [x] `GET /results/{job_id}/info` - Video metadata (frames, fps, dimensions, duration)
+- [x] `GET /results/{job_id}/frame/{frame_number}` - Extract any frame as JPEG
+
 ### Web Frontend
 - [x] Dashboard with job management
 - [x] Video upload interface
@@ -55,6 +59,15 @@
 - [x] Player CRUD operations
 - [x] Shortlist management
 - [x] API client functions for SAM3 (TypeScript)
+- [x] SAM3 Analysis Panel with:
+  - Text-prompted segmentation mode
+  - Team analysis mode with color hints
+  - ByteTrack enhancement mode
+  - Video frame preview with slider
+  - Quick-jump buttons (Start, -1s, +1s, Middle, End)
+  - Video info display (frames, fps, duration, dimensions)
+  - Canvas-based bounding box visualization
+  - Image upload support
 
 ### Infrastructure
 - [x] `Dockerfile` with CUDA 12.1 support
@@ -76,7 +89,7 @@
 
 | Task | Status | Assigned | Blocker |
 |------|--------|----------|---------|
-| SAM3 UI Components | Not Started | - | Need design |
+| SAM3 UI Components | Complete | Claude | Done - includes video frame preview |
 | Real-time processing feedback | Not Started | - | WebSocket setup |
 | Player profile pages (full) | 70% | - | Need SAM3 data |
 
@@ -85,8 +98,8 @@
 ## What's Planned (Not Started)
 
 ### Short Term (Next 2 Weeks)
-- [ ] SAM3 results visualization in web UI
-- [ ] Team color picker for SAM3 hints
+- [x] SAM3 results visualization in web UI (Done - canvas bounding boxes)
+- [x] Team color picker for SAM3 hints (Done - 8 color options)
 - [ ] Batch SAM3 processing for full matches
 - [ ] WebSocket for real-time job updates
 
@@ -109,6 +122,7 @@
 
 | Issue | Severity | Workaround | Fix ETA |
 |-------|----------|------------|---------|
+| SAM3 requires HF authentication | Medium | Set HF_TOKEN + request model access | User setup |
 | CPU processing slow (~60 min for 90 min) | Medium | Use GPU | N/A (hardware) |
 | In-memory job storage (not persistent) | High | Restart loses jobs | Need Redis/DB |
 | No authentication | High | Local use only | Next sprint |
@@ -131,6 +145,73 @@
 ---
 
 ## Recent Changes (Last 5 Sessions)
+
+### 2026-02-05 - SAM3 Video Frame Analysis Support
+**By**: Claude (Opus 4.5)
+
+**Added**:
+- `GET /results/{job_id}/frame/{frame_number}` - Extract single frame as JPEG
+- `GET /results/{job_id}/info` - Get video metadata (total_frames, fps, dimensions)
+- `getVideoInfo()` and `getVideoFrameUrl()` API functions in `web/src/lib/api.ts`
+- Video frame preview with slider in SAM3Panel (segment mode)
+- Video info display (frames, duration, fps, dimensions)
+- Quick jump buttons (Start, -1s, +1s, Middle, End)
+- Frame timestamp display
+- Video frame preview in Teams mode
+
+**Modified**:
+- `web/src/components/SAM3Panel.tsx` - Added video frame support
+- `web/src/lib/api.ts` - Added VideoInfo type and frame API functions
+- `server.py` - Added video frame extraction endpoints (lines 478-569)
+
+**Files Changed**: 4
+
+---
+
+### 2026-02-05 - SAM3 Frontend Panel Implementation
+**By**: Claude (Opus 4.5)
+
+**Added**:
+- `web/src/components/SAM3Panel.tsx` - Complete SAM3 analysis UI with:
+  - Text-prompted segmentation mode
+  - Team analysis mode with color hints
+  - ByteTrack enhancement mode
+  - Status display (device, GPU, model)
+  - Image upload support
+  - Frame selection from video jobs
+  - Results visualization with color swatches
+  - Error handling
+
+**Modified**:
+- `web/src/components/Sidebar.tsx` - Added SAM3 Analysis menu item
+- `web/src/app/page.tsx` - Added SAM3Panel rendering and import
+- `CURRENT_STATE.md` - Updated component status
+
+**Files Changed**: 4
+
+---
+
+### 2026-02-05 - SAM3 API Fix + Text-Prompted Segmentation
+**By**: Claude (Opus 4.5)
+
+**Added**:
+- Pillow dependency for SAM3 image processing
+
+**Modified**:
+- `sam3/config.py` - Updated to use `facebook/sam3` model ID (text-prompted segmentation)
+- `sam3/model_loader.py` - Changed from Sam2Model/Sam2Processor to Sam3Model/Sam3Processor
+- `sam3/processor.py` - Fixed API: `text` parameter instead of `input_text`, added `post_process_instance_segmentation`
+- `requirements.txt` - Updated transformers>=5.0.0 for SAM3 support
+- `CURRENT_STATE.md` - Updated with setup instructions
+
+**Technical Notes**:
+- SAM3 (Segment Anything 3) supports text prompts like "football player in blue jersey"
+- SAM2 only supports point/box prompts (no text)
+- SAM3 is a gated model - requires HF token + model access request
+
+**Files Changed**: 5
+
+---
 
 ### 2026-02-05 - SAM3 Integration + Documentation
 **By**: Claude (Opus 4.5)
@@ -175,10 +256,29 @@
 
 ## Environment Status
 
+### SAM3 Setup Instructions (REQUIRED for SAM3 features)
+
+1. **Request Model Access**:
+   - Go to https://huggingface.co/facebook/sam3
+   - Click "Request access" and wait for approval
+
+2. **Get HuggingFace Token**:
+   - Go to https://huggingface.co/settings/tokens
+   - Create a new token with "read" permissions
+
+3. **Set Environment Variable**:
+   ```bash
+   # Windows
+   set HF_TOKEN=hf_your_token_here
+
+   # Linux/Mac
+   export HF_TOKEN=hf_your_token_here
+   ```
+
 ### Required Environment Variables
 ```
 HF_TOKEN          # HuggingFace token - REQUIRED for SAM3
-SAM3_VARIANT      # base (default), large, or huge
+SAM3_VARIANT      # base (default) - all use facebook/sam3
 SAM3_DEVICE       # cuda, cpu, or auto (default)
 ```
 
@@ -205,9 +305,9 @@ ANTHROPIC_API_KEY      # For AI reports
 ## Next Session Recommendations
 
 1. **If continuing SAM3 work**:
-   - Test SAM3 endpoints with real video
-   - Add SAM3 panel to web UI
-   - Implement team color hints UI
+   - Test SAM3 panel with real match footage
+   - Add batch processing for multiple frames
+   - Implement SAM3 result caching
 
 2. **If starting new feature**:
    - Read `SCOUTBASE_CONTEXT.md` first
@@ -218,6 +318,10 @@ ANTHROPIC_API_KEY      # For AI reports
    - Check Known Issues section above
    - Check Technical Debt section
    - Update this file after fix
+
+4. **Server restart note**:
+   - After code changes, restart backend: `python server.py`
+   - Frontend hot-reloads automatically
 
 ---
 

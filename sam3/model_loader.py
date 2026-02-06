@@ -134,12 +134,12 @@ class SAM3ModelLoader:
         try:
             import torch
             from transformers import (
-                Sam2Model,
-                Sam2Processor,
+                Sam3Model,
+                Sam3Processor,
             )
 
-            # Load processor
-            self._processor = Sam2Processor.from_pretrained(
+            # Load processor - SAM3 supports text-prompted segmentation
+            self._processor = Sam3Processor.from_pretrained(
                 self.config.model_id,
                 token=self.config.hf_token,
             )
@@ -150,16 +150,33 @@ class SAM3ModelLoader:
             }
 
             # Use flash attention if available and enabled
+            use_flash = False
             if self.config.use_flash_attention:
                 try:
+                    import flash_attn
                     model_kwargs["attn_implementation"] = "flash_attention_2"
-                except Exception:
-                    logger.warning("Flash attention not available, using default")
+                    use_flash = True
+                    logger.info("Using Flash Attention 2")
+                except ImportError:
+                    logger.info("Flash Attention not installed, using default attention")
 
-            self._model = Sam2Model.from_pretrained(
-                self.config.model_id,
-                **model_kwargs
-            )
+            # Try to load the model
+            try:
+                self._model = Sam3Model.from_pretrained(
+                    self.config.model_id,
+                    **model_kwargs
+                )
+            except Exception as e:
+                if use_flash and "flash" in str(e).lower():
+                    # Retry without flash attention
+                    logger.warning(f"Flash attention failed, retrying without: {e}")
+                    model_kwargs.pop("attn_implementation", None)
+                    self._model = Sam3Model.from_pretrained(
+                        self.config.model_id,
+                        **model_kwargs
+                    )
+                else:
+                    raise
 
             # Move to device
             self._model = self._model.to(self.device)
@@ -178,12 +195,12 @@ class SAM3ModelLoader:
             return self._model, self._processor
 
         except ImportError as e:
-            # SAM2 might not be available yet, provide helpful message
-            if "Sam2" in str(e):
+            # SAM3 might not be available yet, provide helpful message
+            if "Sam3" in str(e) or "Sam2" in str(e):
                 raise RuntimeError(
-                    "SAM2/SAM3 models not found in transformers. "
-                    "Please ensure you have transformers>=4.38.0 installed "
-                    "and the SAM2 models are available on HuggingFace. "
+                    "SAM3 models not found in transformers. "
+                    "Please ensure you have transformers>=5.0.0 installed "
+                    "and the SAM3 models are available on HuggingFace. "
                     f"Original error: {e}"
                 )
             raise

@@ -56,7 +56,7 @@ class SAM3Config:
 
     # Performance
     use_flash_attention: bool = field(
-        default_factory=lambda: os.getenv("SAM3_FLASH_ATTENTION", "true").lower() == "true"
+        default_factory=lambda: os.getenv("SAM3_FLASH_ATTENTION", "false").lower() == "true"
     )
     compile_model: bool = field(
         default_factory=lambda: os.getenv("SAM3_COMPILE", "false").lower() == "true"
@@ -78,12 +78,12 @@ class SAM3Config:
     @property
     def model_id(self) -> str:
         """Get the HuggingFace model ID based on variant."""
-        # SAM3 model IDs on HuggingFace
-        # Note: Update these when official SAM3 models are released
+        # SAM3 model ID on HuggingFace - SAM3 supports text-prompted segmentation
+        # All variants use the same model, different loading configurations
         model_map = {
-            "base": "facebook/sam2.1-hiera-base-plus",
-            "large": "facebook/sam2.1-hiera-large",
-            "huge": "facebook/sam2.1-hiera-large",  # Fallback until huge is released
+            "base": "facebook/sam3",
+            "large": "facebook/sam3",
+            "huge": "facebook/sam3",
         }
         return model_map.get(self.variant, model_map["base"])
 

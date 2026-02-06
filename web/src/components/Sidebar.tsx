@@ -14,6 +14,7 @@ export const Sidebar = ({ activeSection, onSectionChange, shortlistCount, compar
     const items = [
         { key: "database", label: "Player Database", icon: "👤" },
         { key: "upload", label: "Upload Match", icon: "🎬" },
+        { key: "sam3", label: "SAM3 Analysis", icon: "🎯" },
         { key: "shortlist", label: "My Shortlist", icon: "⭐", count: shortlistCount },
         { key: "compare", label: "Comparison", icon: "⚖️", count: compareCount },
         { key: "leagues", label: "League Intel", icon: "🌍" },
