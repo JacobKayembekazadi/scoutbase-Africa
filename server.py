@@ -97,11 +97,14 @@ async def lifespan(app: FastAPI):
         await sync_cache_from_db()
 
     # Issue 9: SAM3 Background Loading (P1 Fix)
-    if SAM3_AVAILABLE and sam3_processor:
+    # Skip local model loading when using Modal GPU backend
+    if SAM3_AVAILABLE and sam3_processor and SAM3_BACKEND != "modal":
         print("[LifeSpan] Warming up SAM3 model in background...")
         loop = asyncio.get_running_loop()
         # Offload heavy model loading to thread pool so API remains responsive
         loop.run_in_executor(None, sam3_processor.model_loader.load)
+    elif SAM3_BACKEND == "modal":
+        print("[LifeSpan] SAM3 using Modal GPU backend — skipping local model load")
 
     # Issue 3: Disk Cleanup Task (P2 Fix)
     async def cleanup_loop():
