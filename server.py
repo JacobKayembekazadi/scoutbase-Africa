@@ -358,16 +358,6 @@ def _start_autosave():
     pass
 
 
-def _start_autosave():
-    """Schedule periodic auto-save. Error-resilient — RL3-9."""
-    global _autosave_timer
-    try:
-        _save_state()
-    except Exception as e:
-        print(f"[Autosave] WARNING: Save failed, will retry next interval: {e}")
-    _autosave_timer = threading.Timer(_AUTOSAVE_INTERVAL, _start_autosave)
-    _autosave_timer.daemon = True
-    _autosave_timer.start()
 
 
 async def _save_state_async():
