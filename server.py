@@ -90,6 +90,17 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
 
+import re as _re
+
+def _sanitize_filename(name: str | None) -> str:
+    """Sanitize user-supplied filename to prevent path traversal."""
+    if not name:
+        return "video.mp4"
+    # Strip directory components and dangerous chars
+    name = Path(name).name
+    name = _re.sub(r'[^\w\-.]', '_', name)
+    return name or "video.mp4"
+
 # Global processing semaphore (BS4)
 # Initialized in lifespan to ensure event loop binding
 processing_semaphore: asyncio.Semaphore = None

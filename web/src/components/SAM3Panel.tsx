@@ -433,7 +433,7 @@ export const SAM3Panel: React.FC<SAM3PanelProps> = ({ onBack }) => {
                 }}>
                     <div style={{ background: COLORS.card, padding: 16, borderRadius: 12, border: `1px solid ${COLORS.border}` }}>
                         <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 4 }}>DEVICE</div>
-                        <div style={{ fontSize: 14, fontWeight: 600 }}>{status.device.toUpperCase()}</div>
+                        <div style={{ fontSize: 14, fontWeight: 600 }}>{(status.device || 'N/A').toUpperCase()}</div>
                     </div>
                     <div style={{ background: COLORS.card, padding: 16, borderRadius: 12, border: `1px solid ${COLORS.border}` }}>
                         <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 4 }}>GPU</div>
