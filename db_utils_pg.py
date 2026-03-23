@@ -54,11 +54,28 @@ async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         url = _get_database_url()
+
+        async def _init_connection(conn):
+            # Register JSONB codec so asyncpg returns dicts instead of raw strings
+            await conn.set_type_codec(
+                'jsonb',
+                encoder=json.dumps,
+                decoder=json.loads,
+                schema='pg_catalog',
+            )
+            await conn.set_type_codec(
+                'json',
+                encoder=json.dumps,
+                decoder=json.loads,
+                schema='pg_catalog',
+            )
+
         _pool = await asyncpg.create_pool(
             url,
             min_size=2,
             max_size=10,
             command_timeout=30,
+            init=_init_connection,
         )
         logger.info("[Database] PostgreSQL pool created")
     return _pool
@@ -187,10 +204,10 @@ async def insert_player(player_id: str, data: dict):
             data.get("reliabilityScore", 0),
             data.get("dataConfidence", 0),
             datetime.now(),
-            json.dumps(data.get("stats", {})),
-            json.dumps(data.get("medical", {})),
-            json.dumps(data.get("behavioral", {})),
-            json.dumps(data.get("contract", {})),
+            data.get("stats", {}),
+            data.get("medical", {}),
+            data.get("behavioral", {}),
+            data.get("contract", {}),
             data.get("scoutNotes", ""),
         )
 
@@ -216,10 +233,10 @@ async def update_player(player_id: str, data: dict):
             data.get("verificationStatus"),
             data.get("reliabilityScore"),
             data.get("dataConfidence"),
-            json.dumps(data.get("stats", {})),
-            json.dumps(data.get("medical", {})),
-            json.dumps(data.get("behavioral", {})),
-            json.dumps(data.get("contract", {})),
+            data.get("stats", {}),
+            data.get("medical", {}),
+            data.get("behavioral", {}),
+            data.get("contract", {}),
             data.get("scoutNotes", ""),
             player_id,
         )
@@ -245,7 +262,7 @@ async def insert_job(job_id: str, status: str, video_filename: str, config: dict
             job_id,
             status,
             video_filename,
-            json.dumps(config),
+            config,
         )
 
 
@@ -262,7 +279,7 @@ async def update_job_status(job_id: str, status: str, **kwargs):
                 """,
                 status,
                 kwargs.get("results_path"),
-                json.dumps(kwargs.get("metadata", {})),
+                kwargs.get("metadata", {}),
                 job_id,
             )
         elif status == "failed":
