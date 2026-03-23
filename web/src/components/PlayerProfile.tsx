@@ -9,7 +9,7 @@ interface PlayerProfileProps {
     onBack: () => void;
     onCompare: (player: Player) => void;
     isInCompare: boolean;
-    onToggleShortlist: (playerId: number) => void;
+    onToggleShortlist: (playerId: string) => void;
     isInShortlist: boolean;
     onRequestReport: (player: Player) => void;
 }

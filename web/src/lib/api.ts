@@ -19,7 +19,57 @@ import {
     EnhanceTracksResponse,
 } from './types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import { getAccessToken } from './supabase';
+
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+// ---------------------------------------------------------------------------
+// Request Timeout — RL3-8
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds for normal requests
+
+/**
+ * Wrapper around fetch that enforces a timeout via AbortController
+ * and injects Supabase JWT auth header when available.
+ */
+export async function fetchWithTimeout(
+    input: RequestInfo | URL,
+    init?: RequestInit & { timeoutMs?: number },
+): Promise<Response> {
+    const timeoutMs = init?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    // Inject auth header
+    const headers = new Headers(init?.headers);
+    try {
+        const token = await getAccessToken();
+        if (token) {
+            headers.set('Authorization', `Bearer ${token}`);
+        }
+    } catch {
+        // Auth not available (SSR or not logged in) — continue without token
+    }
+
+    try {
+        const response = await fetch(input, {
+            ...init,
+            headers,
+            signal: controller.signal,
+        });
+        return response;
+    } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+            throw new Error(
+                `Request timed out after ${timeoutMs / 1000}s. The server may be overloaded or unreachable.`
+            );
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Error Handling
@@ -34,7 +84,19 @@ export class ApiError extends Error {
 
 async function handleResponse<T>(response: Response): Promise<T> {
     if (!response.ok) {
-        const message = await response.text().catch(() => response.statusText);
+        let message = response.statusText;
+        try {
+            const body = await response.text();
+            // FastAPI returns errors as {"detail": "..."}, try to extract that
+            try {
+                const parsed = JSON.parse(body);
+                message = parsed.detail || parsed.message || body;
+            } catch {
+                message = body || message;
+            }
+        } catch {
+            // If we can't read the body at all, fall through to statusText
+        }
         throw new ApiError(response.status, message);
     }
     return response.json();
@@ -66,12 +128,12 @@ export async function getPlayers(filters?: PlayerFilters): Promise<PlayersRespon
     const queryString = params.toString();
     const url = `${API_BASE}/players${queryString ? `?${queryString}` : ''}`;
 
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     return handleResponse<PlayersResponse>(response);
 }
 
-export async function getPlayer(id: number): Promise<Player> {
-    const response = await fetch(`${API_BASE}/players/${id}`);
+export async function getPlayer(id: string): Promise<Player> {
+    const response = await fetchWithTimeout(`${API_BASE}/players/${id}`);
     return handleResponse<Player>(response);
 }
 
@@ -91,7 +153,7 @@ export interface PlayerCreateData {
 }
 
 export async function createPlayer(player: PlayerCreateData): Promise<Player> {
-    const response = await fetch(`${API_BASE}/players`, {
+    const response = await fetchWithTimeout(`${API_BASE}/players`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(player),
@@ -99,8 +161,8 @@ export async function createPlayer(player: PlayerCreateData): Promise<Player> {
     return handleResponse<Player>(response);
 }
 
-export async function updatePlayer(id: number, updates: Partial<Player>): Promise<Player> {
-    const response = await fetch(`${API_BASE}/players/${id}`, {
+export async function updatePlayer(id: string, updates: Partial<Player>): Promise<Player> {
+    const response = await fetchWithTimeout(`${API_BASE}/players/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -117,7 +179,7 @@ export interface LeaguesResponse {
 }
 
 export async function getLeagues(): Promise<LeaguesResponse> {
-    const response = await fetch(`${API_BASE}/leagues`);
+    const response = await fetchWithTimeout(`${API_BASE}/leagues`);
     return handleResponse<LeaguesResponse>(response);
 }
 
@@ -126,23 +188,23 @@ export async function getLeagues(): Promise<LeaguesResponse> {
 // ---------------------------------------------------------------------------
 
 export interface ShortlistResponse {
-    shortlist: number[];
+    shortlist: string[];
 }
 
 export async function getShortlist(): Promise<ShortlistResponse> {
-    const response = await fetch(`${API_BASE}/shortlist`);
+    const response = await fetchWithTimeout(`${API_BASE}/shortlist`);
     return handleResponse<ShortlistResponse>(response);
 }
 
-export async function addToShortlist(playerId: number): Promise<ShortlistResponse> {
-    const response = await fetch(`${API_BASE}/shortlist/${playerId}`, {
+export async function addToShortlist(playerId: string): Promise<ShortlistResponse> {
+    const response = await fetchWithTimeout(`${API_BASE}/shortlist/${playerId}`, {
         method: 'POST',
     });
     return handleResponse<ShortlistResponse>(response);
 }
 
-export async function removeFromShortlist(playerId: number): Promise<ShortlistResponse> {
-    const response = await fetch(`${API_BASE}/shortlist/${playerId}`, {
+export async function removeFromShortlist(playerId: string): Promise<ShortlistResponse> {
+    const response = await fetchWithTimeout(`${API_BASE}/shortlist/${playerId}`, {
         method: 'DELETE',
     });
     return handleResponse<ShortlistResponse>(response);
@@ -159,7 +221,7 @@ export interface HealthResponse {
 }
 
 export async function checkHealth(): Promise<HealthResponse> {
-    const response = await fetch(`${API_BASE}/health`);
+    const response = await fetchWithTimeout(`${API_BASE}/health`);
     return handleResponse<HealthResponse>(response);
 }
 
@@ -183,12 +245,12 @@ export interface JobsResponse {
 }
 
 export async function getJobs(): Promise<JobsResponse> {
-    const response = await fetch(`${API_BASE}/jobs`);
+    const response = await fetchWithTimeout(`${API_BASE}/jobs`);
     return handleResponse<JobsResponse>(response);
 }
 
 export async function getJobStatus(jobId: string): Promise<ProcessingJob> {
-    const response = await fetch(`${API_BASE}/status/${jobId}`);
+    const response = await fetchWithTimeout(`${API_BASE}/status/${jobId}`);
     return handleResponse<ProcessingJob>(response);
 }
 
@@ -209,7 +271,7 @@ export interface ProcessingResults {
 }
 
 export async function getJobResults(jobId: string): Promise<ProcessingResults> {
-    const response = await fetch(`${API_BASE}/results/${jobId}`);
+    const response = await fetchWithTimeout(`${API_BASE}/results/${jobId}`);
     return handleResponse<ProcessingResults>(response);
 }
 
@@ -226,14 +288,14 @@ export function getPlayerCsvUrl(jobId: string): string {
 // ---------------------------------------------------------------------------
 
 export async function getJobTracks(jobId: string): Promise<TracksResponse> {
-    const response = await fetch(`${API_BASE}/results/${jobId}/tracks`);
+    const response = await fetchWithTimeout(`${API_BASE}/results/${jobId}/tracks`);
     return handleResponse<TracksResponse>(response);
 }
 
 export interface AssignTrackResponse {
     message: string;
     assignment: {
-        player_id: number;
+        player_id: string;
         assigned_at: string;
         notes?: string;
     };
@@ -242,10 +304,10 @@ export interface AssignTrackResponse {
 export async function assignTrackToPlayer(
     jobId: string,
     trackId: number,
-    playerId: number,
+    playerId: string,
     notes?: string
 ): Promise<AssignTrackResponse> {
-    const response = await fetch(`${API_BASE}/results/${jobId}/tracks/${trackId}/assign`, {
+    const response = await fetchWithTimeout(`${API_BASE}/results/${jobId}/tracks/${trackId}/assign`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ player_id: playerId, notes }),
@@ -268,7 +330,7 @@ export interface CreatePlayerFromTrackResponse {
     message: string;
     player: Player;
     assignment: {
-        player_id: number;
+        player_id: string;
         assigned_at: string;
         notes?: string;
     };
@@ -279,7 +341,7 @@ export async function createPlayerFromTrack(
     trackId: number,
     playerData: CreatePlayerFromTrackData
 ): Promise<CreatePlayerFromTrackResponse> {
-    const response = await fetch(`${API_BASE}/results/${jobId}/tracks/${trackId}/create-player`, {
+    const response = await fetchWithTimeout(`${API_BASE}/results/${jobId}/tracks/${trackId}/create-player`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(playerData),
@@ -288,7 +350,7 @@ export async function createPlayerFromTrack(
 }
 
 export async function unassignTrack(jobId: string, trackId: number): Promise<{ message: string }> {
-    const response = await fetch(`${API_BASE}/results/${jobId}/tracks/${trackId}/unassign`, {
+    const response = await fetchWithTimeout(`${API_BASE}/results/${jobId}/tracks/${trackId}/unassign`, {
         method: 'DELETE',
     });
     return handleResponse<{ message: string }>(response);
@@ -303,7 +365,7 @@ export async function unassignTrack(jobId: string, trackId: number): Promise<{ m
  * Use this to verify GPU availability and model loading before making SAM3 requests.
  */
 export async function getSAM3Status(): Promise<SAM3StatusResponse> {
-    const response = await fetch(`${API_BASE}/sam3/status`);
+    const response = await fetchWithTimeout(`${API_BASE}/sam3/status`);
     return handleResponse<SAM3StatusResponse>(response);
 }
 
@@ -321,10 +383,11 @@ export async function getSAM3Status(): Promise<SAM3StatusResponse> {
  * ```
  */
 export async function sam3Segment(request: SegmentationRequest): Promise<SegmentationResponse> {
-    const response = await fetch(`${API_BASE}/sam3/segment`, {
+    const response = await fetchWithTimeout(`${API_BASE}/sam3/segment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
+        timeoutMs: 120_000, // 2 min — GPU-intensive
     });
     return handleResponse<SegmentationResponse>(response);
 }
@@ -345,10 +408,11 @@ export async function sam3Segment(request: SegmentationRequest): Promise<Segment
  * ```
  */
 export async function sam3Track(request: TrackingRequest): Promise<TrackingResponse> {
-    const response = await fetch(`${API_BASE}/sam3/track`, {
+    const response = await fetchWithTimeout(`${API_BASE}/sam3/track`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
+        timeoutMs: 120_000, // 2 min — GPU-intensive
     });
     return handleResponse<TrackingResponse>(response);
 }
@@ -368,10 +432,11 @@ export async function sam3Track(request: TrackingRequest): Promise<TrackingRespo
  * ```
  */
 export async function sam3Teams(request: TeamSegmentationRequest): Promise<TeamSegmentationResponse> {
-    const response = await fetch(`${API_BASE}/sam3/teams`, {
+    const response = await fetchWithTimeout(`${API_BASE}/sam3/teams`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
+        timeoutMs: 120_000, // 2 min — GPU-intensive
     });
     return handleResponse<TeamSegmentationResponse>(response);
 }
@@ -393,10 +458,11 @@ export async function sam3EnhanceTracks(
     jobId: string,
     request: EnhanceTracksRequest = {}
 ): Promise<EnhanceTracksResponse> {
-    const response = await fetch(`${API_BASE}/sam3/enhance/${jobId}/tracks`, {
+    const response = await fetchWithTimeout(`${API_BASE}/sam3/enhance/${jobId}/tracks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
+        timeoutMs: 120_000, // 2 min — GPU-intensive
     });
     return handleResponse<EnhanceTracksResponse>(response);
 }
@@ -417,7 +483,7 @@ export interface VideoInfo {
  * Get video metadata including total frames, fps, and dimensions.
  */
 export async function getVideoInfo(jobId: string): Promise<VideoInfo> {
-    const response = await fetch(`${API_BASE}/results/${jobId}/info`);
+    const response = await fetchWithTimeout(`${API_BASE}/results/${jobId}/info`);
     return handleResponse<VideoInfo>(response);
 }
 

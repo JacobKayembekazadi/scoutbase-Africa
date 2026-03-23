@@ -1,0 +1,62 @@
+# ScoutBase Africa — Production CPU-Only Dockerfile
+# =================================================
+# Lightweight image without NVIDIA CUDA (~2GB vs ~8GB)
+# GPU inference offloaded to Modal serverless
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SAM3_VARIANT=base \
+    SAM3_DEVICE=cpu \
+    SAM3_BACKEND=modal \
+    SAM3_LAZY_LOAD=true
+
+# System dependencies (FFmpeg for video, OpenGL for OpenCV)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    ffmpeg \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Create directories
+RUN mkdir -p uploads results checkpoints data
+
+# Copy requirements first for Docker layer caching
+COPY requirements.prod.txt .
+
+# Install PyTorch CPU-only (much smaller than CUDA version)
+RUN pip install --upgrade pip && \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Install Python dependencies
+RUN pip install -r requirements.prod.txt
+
+# Install ByteTrack tracker
+RUN pip install git+https://github.com/roboflow/trackers.git
+
+# Copy application code
+COPY . .
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

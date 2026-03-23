@@ -3,9 +3,9 @@
 > **MANDATORY**: This file MUST be updated after EVERY development session.
 > See instructions at bottom of this file.
 
-**Last Updated**: 2026-02-05
-**Updated By**: Claude (Opus 4.5)
-**Session Focus**: SAM3 Video Frame Analysis Support
+**Last Updated**: 2026-02-13
+**Updated By**: Antigravity
+**Session Focus**: SQLite Database Integration & Persistence
 
 ---
 
@@ -18,7 +18,8 @@
 | FastAPI Server | Working | 100% | All endpoints functional |
 | SAM3 Integration | Working | 100% | Tested with HF token |
 | Web Dashboard | Working | 100% | SAM3 Panel added |
-| Player Management | Working | 100% | CRUD + assignments |
+| Player Management | Working | 100% | SQLite Backed |
+| Database | Working | 100% | SQLite (Async) |
 | Documentation | Complete | 100% | BMAD + Context Engineering |
 
 ---
@@ -124,7 +125,7 @@
 |-------|----------|------------|---------|
 | SAM3 requires HF authentication | Medium | Set HF_TOKEN + request model access | User setup |
 | CPU processing slow (~60 min for 90 min) | Medium | Use GPU | N/A (hardware) |
-| In-memory job storage (not persistent) | High | Restart loses jobs | Need Redis/DB |
+| In-memory job storage (not persistent) | High | Restart loses jobs | Fixed (SQLite) |
 | No authentication | High | Local use only | Next sprint |
 | ByteTrack loses tracks during heavy occlusion | Low | SAM3 can help | Investigating |
 
@@ -134,7 +135,7 @@
 
 | Item | Priority | Effort | Notes |
 |------|----------|--------|-------|
-| Replace in-memory stores with Redis | High | Medium | Jobs, players, assignments |
+| Replace in-memory stores with Redis | High | Medium | Done (SQLite) |
 | Add comprehensive error handling | Medium | Low | Some paths unhandled |
 | Add request validation middleware | Medium | Low | Pydantic handles most |
 | Add API rate limiting | Low | Low | Not needed until production |
@@ -145,6 +146,71 @@
 ---
 
 ## Recent Changes (Last 5 Sessions)
+
+### 2026-02-13 - SQLite Database Integration
+**By**: Antigravity
+
+**Added**:
+- `db_utils.py` - Database initialization and migration logic.
+- `data/schema.sql` - SQLite schema with JSON support.
+- `aiosqlite` dependency.
+
+**Modified**:
+- `server.py` - Refactored all write operations to use `aiosqlite`.
+- `server.py` - Implemented async DB-to-cache sync on startup.
+- `server.py` - Added job persistence to SQLite.
+- `CURRENT_STATE.md` - Status updates.
+
+**Removed**:
+- Broken `seed_demo_data` function (replaced with async version).
+- In-memory persistence logic (`_save_state` is now no-op).
+
+**Files Changed**: 4
+
+---
+
+### 2026-02-13 - Authentication Implementation (Auth.js)
+**By**: Antigravity
+
+**Added**:
+- `next-auth@beta` (Auth.js v5).
+- `web/src/auth.ts` & `web/src/auth.config.ts` - Credentials Provider configuration.
+- `web/src/middleware.ts` - Route protection for Dashboard.
+- `web/src/app/login/page.tsx` - Dark mode login page.
+- `web/src/components/auth/LoginForm.tsx` - Client-side login form using Server Actions.
+- `web/src/lib/actions.ts` - `authenticate` and `handleSignOut` server actions.
+- `web/.env.local` - Auth secrets.
+
+**Modified**:
+- `web/src/components/Sidebar.tsx` - Added "Sign Out" button and user display.
+
+**Removed**:
+- Airtable integration plans (User explicitly rejected Airtable).
+
+**Files Changed**: 8
+
+---
+
+### 2026-02-05 - UUID Migration & Backend Resilience
+**By**: Antigravity
+
+**Modified**:
+- **Backend (`server.py`)**: Migrated all Player and TrackAssignment IDs from `int` to `str` (UUID).
+  - Implemented `uuid.uuid4()` for ID generation.
+  - Removed deprecated `next_player_id`.
+  - Added `processing_semaphore` for sequential GPU tasks (OOM prevention).
+  - Added auto-cleanup background task for old uploads/results.
+  - Improved `lifespan` for robust startup/shutdown.
+- **Frontend (`types.ts`, `api.ts`, `page.tsx`)**: Updated all interfaces to use `string` for IDs.
+- **Components (`VideoUpload`, `TrackAssignment`, `PlayerProfile`)**: Updated props and callbacks for string IDs.
+- **Resilience**: Improved `pollJobStatus` with dynamic intervals and 404 handling.
+
+**Technical Notes**:
+- Existing `data/state.json` with integer IDs is incompatible. Server will regenerate fresh UUIDs on restart if file is missing/invalid or if logic dictates (currently logic handles reading, but mixed types might cause issues. Recommended to clear `data/state.json`).
+
+**Files Changed**: 8
+
+---
 
 ### 2026-02-05 - SAM3 Video Frame Analysis Support
 **By**: Claude (Opus 4.5)

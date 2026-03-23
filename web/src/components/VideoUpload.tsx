@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useCallback } from 'react';
 import { COLORS } from '@/lib/constants';
+import { API_BASE } from '@/lib/api';
 import { TrackAssignment } from './TrackAssignment';
 
 interface UploadJob {
@@ -13,19 +14,32 @@ interface UploadJob {
     error?: string;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
 export const VideoUpload = () => {
     const [isDragging, setIsDragging] = useState(false);
     const [uploading, setUploading] = useState(false);
     const [jobs, setJobs] = useState<UploadJob[]>([]);
     const [error, setError] = useState<string | null>(null);
     const [assigningJobId, setAssigningJobId] = useState<string | null>(null);
+    const [homeTeam, setHomeTeam] = useState('');
+    const [awayTeam, setAwayTeam] = useState('');
+    const [competition, setCompetition] = useState('');
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const MAX_FILE_SIZE_MB = 2048; // 2GB
 
     const pollJobStatus = useCallback(async (jobId: string) => {
         try {
             const res = await fetch(`${API_BASE}/status/${jobId}`);
+
+            if (res.status === 404) {
+                setJobs(prev => prev.map(j =>
+                    j.job_id === jobId ? { ...j, status: 'failed', error: 'Job not found (server restarted?)' } : j
+                ));
+                return; // Stop polling
+            }
+
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
             const data = await res.json();
 
             setJobs(prev => prev.map(j =>
@@ -33,22 +47,33 @@ export const VideoUpload = () => {
             ));
 
             if (data.status === 'processing' || data.status === 'queued') {
-                setTimeout(() => pollJobStatus(jobId), 2000);
+                // RL2-8: Dynamic interval to reduce load
+                const delay = data.status === 'queued' ? 5000 : 2000;
+                setTimeout(() => pollJobStatus(jobId), delay);
             }
         } catch (err) {
             console.error('Failed to poll job status:', err);
+            // Retry on network error after delay
+            setTimeout(() => pollJobStatus(jobId), 10000);
         }
     }, []);
 
     const handleUpload = async (file: File) => {
+        // Client-side file size validation
+        const fileSizeMB = file.size / (1024 * 1024);
+        if (fileSizeMB > MAX_FILE_SIZE_MB) {
+            setError(`File too large (${fileSizeMB.toFixed(0)}MB). Maximum size is ${MAX_FILE_SIZE_MB}MB.`);
+            return;
+        }
+
         setUploading(true);
         setError(null);
 
         const formData = new FormData();
         formData.append('video', file);
-        formData.append('home_team', 'Team A');
-        formData.append('away_team', 'Team B');
-        formData.append('competition', 'Demo Match');
+        formData.append('home_team', homeTeam || 'Unknown Home');
+        formData.append('away_team', awayTeam || 'Unknown Away');
+        formData.append('competition', competition || 'Unspecified');
 
         try {
             const res = await fetch(`${API_BASE}/process`, {
@@ -57,7 +82,15 @@ export const VideoUpload = () => {
             });
 
             if (!res.ok) {
-                throw new Error(`Upload failed: ${res.statusText}`);
+                // Try to extract detailed error message from response body
+                let errorMessage: string;
+                try {
+                    const errorBody = await res.json();
+                    errorMessage = errorBody.detail || errorBody.message || res.statusText;
+                } catch {
+                    errorMessage = await res.text().catch(() => res.statusText);
+                }
+                throw new Error(errorMessage);
             }
 
             const data = await res.json();
@@ -116,6 +149,44 @@ export const VideoUpload = () => {
             <h2 style={{ margin: "0 0 16px", fontSize: 20, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>
                 Upload Match Video
             </h2>
+
+            {/* Match Info Inputs */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
+                <input
+                    placeholder="Home Team"
+                    value={homeTeam}
+                    onChange={(e) => setHomeTeam(e.target.value)}
+                    style={{
+                        padding: '10px 12px', borderRadius: 8,
+                        border: `1px solid ${COLORS.border}`,
+                        background: COLORS.card, color: COLORS.text,
+                        fontSize: 13, outline: 'none',
+                    }}
+                />
+                <input
+                    placeholder="Away Team"
+                    value={awayTeam}
+                    onChange={(e) => setAwayTeam(e.target.value)}
+                    style={{
+                        padding: '10px 12px', borderRadius: 8,
+                        border: `1px solid ${COLORS.border}`,
+                        background: COLORS.card, color: COLORS.text,
+                        fontSize: 13, outline: 'none',
+                    }}
+                />
+            </div>
+            <input
+                placeholder="Competition / League"
+                value={competition}
+                onChange={(e) => setCompetition(e.target.value)}
+                style={{
+                    width: '100%', padding: '10px 12px', borderRadius: 8,
+                    border: `1px solid ${COLORS.border}`,
+                    background: COLORS.card, color: COLORS.text,
+                    fontSize: 13, marginBottom: 16, outline: 'none',
+                    boxSizing: 'border-box',
+                }}
+            />
 
             {/* Drop Zone */}
             <div

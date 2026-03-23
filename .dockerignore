@@ -1,0 +1,51 @@
+# ScoutBase Africa - Docker Ignore
+# Prevents sensitive files and unnecessary bulk from being copied into Docker images
+
+# Environment files with secrets (RL4-9)
+.env
+.env.local
+.env.production
+
+# Runtime data directories
+uploads/
+results/
+data/
+checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Node.js
+node_modules/
+web/node_modules/
+web/.next/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Logs
+*.log
+
+# Temp files
+*.tmp
+temp_*.json
+nul
+
+# Documentation (not needed in runtime image)
+docs/
+*.md
+!README.md
+
+# Deprecated files
+*.deprecated.*

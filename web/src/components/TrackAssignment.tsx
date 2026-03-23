@@ -50,7 +50,7 @@ export const TrackAssignment: React.FC<TrackAssignmentProps> = ({ jobId, onClose
         }
     };
 
-    const handleAssign = async (trackId: number, playerId: number) => {
+    const handleAssign = async (trackId: number, playerId: string) => {
         try {
             await assignTrackToPlayer(jobId, trackId, playerId);
             await loadData();

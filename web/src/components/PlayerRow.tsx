@@ -14,12 +14,20 @@ export const PlayerRow = ({ player, onClick, onCompare, isInCompare }: PlayerRow
     return (
         <div
             onClick={onClick}
+            role="button"
+            tabIndex={0}
+            aria-label={`View profile for ${player.name}, ${player.position} at ${player.club}`}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
             style={{
                 display: "flex", alignItems: "center", gap: 16, padding: "12px 20px",
                 background: COLORS.card, borderRadius: 12,
                 border: `1px solid ${isInCompare ? COLORS.accent : COLORS.border}`,
-                marginBottom: 8, transition: "transform 0.2s, background 0.2s"
+                marginBottom: 8, transition: "transform 0.2s, background 0.2s",
+                cursor: "pointer",
+                outline: "none",
             }}
+            onFocus={e => { e.currentTarget.style.boxShadow = `0 0 0 2px ${COLORS.accent}`; }}
+            onBlur={e => { e.currentTarget.style.boxShadow = 'none'; }}
             onMouseEnter={e => {
                 e.currentTarget.style.borderColor = isInCompare ? COLORS.accent : COLORS.accentDim;
                 e.currentTarget.style.background = COLORS.surfaceHover;

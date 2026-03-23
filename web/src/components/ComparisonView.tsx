@@ -5,7 +5,7 @@ import { VerificationBadge, ScoreRing } from '@/components/ui/Shared';
 
 interface ComparisonViewProps {
     players: Player[];
-    onRemove: (playerId: number) => void;
+    onRemove: (playerId: string) => void;
     onViewProfile: (player: Player) => void;
 }
 

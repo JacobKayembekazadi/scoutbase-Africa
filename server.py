@@ -12,6 +12,11 @@ Or with auto-reload for development:
 """
 
 import os
+import sys
+import shutil
+import signal
+import atexit
+import threading
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -20,16 +25,18 @@ load_dotenv()
 import uuid
 import json
 import asyncio
-import tempfile
-import shutil
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+import re
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, field_validator
+from typing import Optional, List, Dict, Any, Literal
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from process_match import process_match_video, generate_scout_report
 
@@ -66,32 +73,319 @@ try:
     )
 except ImportError:
     supabase = None
+    
+# Global processing semaphore (BS4)
+# Initialized in lifespan to ensure event loop binding
+processing_semaphore: asyncio.Semaphore = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    print("[LifeSpan] Server Starting...")
+    global processing_semaphore
+    processing_semaphore = asyncio.Semaphore(1)
+
+    # Init DB and Migrate
+    await init_db()
+    await migrate_json_to_db()
+    await sync_cache_from_db()
+
+    if not players_db:
+        print("[LifeSpan] Fresh start. Seeding demo data...")
+        # seed_demo_data() is now updated to write to DB directly
+        await seed_demo_data_async()
+        await sync_cache_from_db()
+
+    # Issue 9: SAM3 Background Loading (P1 Fix)
+    if SAM3_AVAILABLE and sam3_processor:
+        print("[LifeSpan] Warming up SAM3 model in background...")
+        loop = asyncio.get_running_loop()
+        # Offload heavy model loading to thread pool so API remains responsive
+        loop.run_in_executor(None, sam3_processor.model_loader.load)
+
+    # Issue 3: Disk Cleanup Task (P2 Fix)
+    async def cleanup_loop():
+        while True:
+            try:
+                await asyncio.sleep(60) # Initial delay
+                now = datetime.now()
+                cutoff = now - timedelta(hours=24)
+                
+                # Cleanup uploads
+                if UPLOAD_DIR.exists():
+                    for f in UPLOAD_DIR.glob("*"):
+                        if f.is_file() and datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
+                            try: f.unlink()
+                            except: pass
+                
+                # Cleanup results
+                if RESULTS_DIR.exists():
+                    for d in RESULTS_DIR.iterdir():
+                        if d.is_dir() and datetime.fromtimestamp(d.stat().st_mtime) < cutoff:
+                            try: shutil.rmtree(d)
+                            except: pass
+                            
+                await asyncio.sleep(3600) # Hourly
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[Cleanup] Error: {e}")
+                await asyncio.sleep(3600)
+    
+    cleanup_task = asyncio.create_task(cleanup_loop())
+    
+    # Start autosave
+    globals().get("_start_autosave")()
+    
+    yield
+    
+    # Shutdown
+    print("[LifeSpan] Shutting down...")
+    cleanup_task.cancel()
+    await close_db_pool()
+    await asyncio.to_thread(globals().get("_save_state"))
+    print("[LifeSpan] Goodbye.")
 
 app = FastAPI(
     title="ScoutBase Processing API",
     description="Video processing pipeline for player tracking and analysis",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
+# CORS: Use explicit origins. Wildcard (*) with credentials is forbidden by spec.
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory stores (use Redis/DB in production)
-jobs: dict = {}
-players_db: Dict[int, dict] = {}
-shortlist_db: set = set()
-track_assignments: Dict[str, Dict[int, dict]] = {}  # {job_id: {track_id: assignment}}
-next_player_id = 1
 
-UPLOAD_DIR = Path("uploads")
-RESULTS_DIR = Path("results")
-UPLOAD_DIR.mkdir(exist_ok=True)
-RESULTS_DIR.mkdir(exist_ok=True)
+# Security headers middleware (RL4-11)
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# ---------------------------------------------------------------------------
+# Database persistence (PostgreSQL via asyncpg OR SQLite fallback)
+# ---------------------------------------------------------------------------
+USE_POSTGRES = bool(os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_PASSWORD"))
+
+if USE_POSTGRES:
+    from db_utils_pg import (
+        init_db, sync_cache_from_db as _pg_sync_cache,
+        close_pool as close_db_pool,
+        insert_player as db_insert_player,
+        update_player as db_update_player,
+        player_exists as db_player_exists,
+        insert_job as db_insert_job,
+        update_job_status as db_update_job_status,
+        upsert_track_assignment as db_upsert_track_assignment,
+        delete_track_assignment as db_delete_track_assignment,
+        upsert_shortlist as db_upsert_shortlist,
+        delete_shortlist as db_delete_shortlist,
+    )
+    async def migrate_json_to_db():
+        pass  # No JSON migration for Postgres
+    print("[Database] Using PostgreSQL (asyncpg)")
+else:
+    from db_utils import init_db, migrate_json_to_db, DB_PATH
+    import aiosqlite
+    async def close_db_pool():
+        pass
+    print("[Database] Using SQLite (aiosqlite) — set DATABASE_URL for PostgreSQL")
+
+# SAM3 Modal backend (optional)
+SAM3_BACKEND = os.getenv("SAM3_BACKEND", "local")  # "local" or "modal"
+modal_sam3_client = None
+if SAM3_BACKEND == "modal":
+    try:
+        from sam3.modal_backend import ModalSAM3Client
+        modal_sam3_client = ModalSAM3Client()
+        print("[SAM3] Using Modal GPU backend")
+    except Exception as e:
+        print(f"[SAM3] Modal backend failed to init: {e}, falling back to local")
+        SAM3_BACKEND = "local"
+
+# ---------------------------------------------------------------------------
+# JWT Auth Middleware (Supabase token validation)
+# ---------------------------------------------------------------------------
+import jwt as pyjwt
+
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+AUTH_ENABLED = bool(SUPABASE_JWT_SECRET)
+
+class JWTAuthMiddleware(BaseHTTPMiddleware):
+    """Validate Supabase JWT on protected endpoints."""
+
+    OPEN_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # Skip auth for health/docs endpoints
+        if path in self.OPEN_PATHS or not AUTH_ENABLED:
+            return await call_next(request)
+
+        # Extract token
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            try:
+                pyjwt.decode(
+                    token,
+                    SUPABASE_JWT_SECRET,
+                    algorithms=["HS256"],
+                    audience="authenticated",
+                )
+            except pyjwt.ExpiredSignatureError:
+                return Response(status_code=401, content="Token expired")
+            except pyjwt.InvalidTokenError:
+                return Response(status_code=401, content="Invalid token")
+        elif AUTH_ENABLED:
+            # No token provided but auth is required
+            return Response(status_code=401, content="Authorization required")
+
+        return await call_next(request)
+
+if AUTH_ENABLED:
+    app.add_middleware(JWTAuthMiddleware)
+    print("[Auth] JWT validation enabled")
+
+# In-memory caches (for read performance)
+# NOTE: for horizontal scaling, use Redis instead
+jobs: dict = {}
+players_db: Dict[str, dict] = {}
+shortlist_db: set = set()
+track_assignments: Dict[str, Dict[int, dict]] = {}
+_player_id_lock = threading.Lock()
+
+def _load_state():
+    """No-op for legacy load, real loading happens in sync_cache_from_db."""
+    return True
+
+async def sync_cache_from_db():
+    """Populate in-memory caches from database on startup."""
+    global players_db, shortlist_db, track_assignments, jobs
+
+    if USE_POSTGRES:
+        # PostgreSQL path — asyncpg returns parsed JSONB automatically
+        caches = await _pg_sync_cache()
+        players_db = caches["players_db"]
+        shortlist_db = caches["shortlist_db"]
+        track_assignments = caches["track_assignments"]
+        jobs = caches["jobs"]
+        return
+
+    # SQLite fallback path
+    print("[Cache] Syncing from SQLite...")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Load Players
+        async with db.execute("SELECT * FROM players") as cursor:
+            async for row in cursor:
+                p = dict(row)
+                for field in ["stats", "medical", "behavioral", "contract"]:
+                    if p.get(field):
+                        try: p[field] = json.loads(p[field])
+                        except: pass
+                players_db[p["id"]] = p
+
+        # Load Shortlist
+        async with db.execute("SELECT player_id FROM shortlists") as cursor:
+            async for row in cursor:
+                shortlist_db.add(row["player_id"])
+
+        # Load Assignments
+        async with db.execute("SELECT * FROM track_assignments") as cursor:
+            async for row in cursor:
+                jid = row["job_id"]
+                if jid not in track_assignments:
+                    track_assignments[jid] = {}
+                track_assignments[jid][row["track_id"]] = {
+                    "player_id": row["player_id"],
+                    "assigned_at": row["assigned_at"],
+                    "notes": row["notes"]
+                }
+
+        # Load Jobs
+        async with db.execute("SELECT * FROM processing_jobs") as cursor:
+            async for row in cursor:
+                job = {
+                    "job_id": row["job_id"],
+                    "status": row["status"],
+                    "results_path": row["results_path"],
+                    "video_filename": row["video_filename"],
+                    "error": row["error"],
+                    "created_at": row["created_at"],
+                    "completed_at": row["completed_at"],
+                }
+                if row["metadata"]:
+                    try: job.update(json.loads(row["metadata"]))
+                    except: pass
+                jobs[row["job_id"]] = job
+
+    print(f"[Cache] Synced {len(players_db)} players, {len(jobs)} jobs")
+
+async def _save_state_async():
+    """
+    No-op: All writes are now direct to DB. 
+    Kept for compatibility with existing calls.
+    We might use this for cache invalidation later.
+    """
+    pass
+
+def _save_state():
+    """No-op: DB writes are immediate."""
+    pass
+
+def _start_autosave():
+    """No-op: DB persistence is immediate."""
+    pass
+
+
+def _start_autosave():
+    """Schedule periodic auto-save. Error-resilient — RL3-9."""
+    global _autosave_timer
+    try:
+        _save_state()
+    except Exception as e:
+        print(f"[Autosave] WARNING: Save failed, will retry next interval: {e}")
+    _autosave_timer = threading.Timer(_AUTOSAVE_INTERVAL, _start_autosave)
+    _autosave_timer.daemon = True
+    _autosave_timer.start()
+
+
+async def _save_state_async():
+    """Non-blocking save for async handlers — RL3-3."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _save_state)
+
+
+def _shutdown_handler(*args):
+    """Graceful shutdown: save state before exit."""
+    global _autosave_timer
+    print("\n[Shutdown] Saving state before exit...")
+    if _autosave_timer:
+        _autosave_timer.cancel()
+    _save_state()
+    sys.exit(0)
+
+# Register shutdown hooks
+atexit.register(_save_state)
+signal.signal(signal.SIGINT, _shutdown_handler)
+signal.signal(signal.SIGTERM, _shutdown_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +466,7 @@ class PlayerBase(BaseModel):
     league: str
     position: str
     photo: Optional[str] = None
-    verificationStatus: str = "unverified"
+    verificationStatus: Literal["verified", "partial", "unverified"] = "unverified"  # RL4-3
     reliabilityScore: int = 0
     dataConfidence: int = 0
     stats: PlayerStats = PlayerStats()
@@ -183,6 +477,20 @@ class PlayerBase(BaseModel):
     matchClips: int = 0
     fullMatches: int = 0
     scoutNotes: str = ""
+
+    @field_validator('reliabilityScore', 'dataConfidence')
+    @classmethod
+    def validate_score_range(cls, v: int) -> int:
+        """Ensure scores are within 0-100 range (RL4-3)."""
+        return max(0, min(100, v))
+
+    @field_validator('age')
+    @classmethod
+    def validate_age(cls, v: int) -> int:
+        """Ensure age is reasonable (RL4-3)."""
+        if v < 0 or v > 60:
+            raise ValueError('Age must be between 0 and 60')
+        return v
 
 
 class PlayerCreate(PlayerBase):
@@ -212,7 +520,7 @@ class PlayerUpdate(BaseModel):
 
 
 class Player(PlayerBase):
-    id: int
+    id: str
 
 
 class LeagueIntel(BaseModel):
@@ -225,7 +533,7 @@ class LeagueIntel(BaseModel):
 
 
 class TrackAssignment(BaseModel):
-    player_id: int
+    player_id: str
     notes: Optional[str] = None
 
 
@@ -247,64 +555,116 @@ class PlayerCreateFromTrack(BaseModel):
 async def process_video_task(job_id: str, video_path: str, config: dict):
     """Run the vision pipeline in the background."""
     job = jobs[job_id]
-    job["status"] = "processing"
-    job["progress"] = 0.1
+    
+    # BS4: Ensure sequential processing to prevent GPU OOM
+    global processing_semaphore
+    if processing_semaphore is None:
+        processing_semaphore = asyncio.Semaphore(1)
+        
+    async with processing_semaphore:
+        job["status"] = "processing"
+        job["progress"] = 0.1
+        
+        # Update DB status
+        if USE_POSTGRES:
+            await db_update_job_status(job_id, "processing")
+        else:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("UPDATE processing_jobs SET status='processing' WHERE job_id=?", (job_id,))
+                await db.commit()
 
-    output_dir = RESULTS_DIR / job_id
+        output_dir = RESULTS_DIR / job_id
 
-    try:
-        # Run the CPU/GPU-intensive processing in a thread pool
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: process_match_video(
-                video_path=video_path,
-                output_dir=str(output_dir),
-                model_path=config.get("model", "yolo11n.pt"),
-                confidence_threshold=config.get("confidence", 0.3),
-                generate_annotated_video=config.get("generate_video", True),
-                process_every_n=config.get("skip_frames", 1),
-            )
-        )
-
-        results_dict = result.to_dict()
-
-        # Generate AI scout report if API key is available
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if gemini_key:
-            match_context = {
-                "competition": config.get("competition", "Unknown"),
-                "home_team": config.get("home_team", "Team A"),
-                "away_team": config.get("away_team", "Team B"),
-                "date": config.get("match_date", "Unknown"),
-            }
-            report = await loop.run_in_executor(
+        try:
+            # Run the CPU/GPU-intensive processing in a thread pool
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
                 None,
-                lambda: generate_scout_report(results_dict, match_context, gemini_key)
+                lambda: process_match_video(
+                    video_path=video_path,
+                    output_dir=str(output_dir),
+                    model_path=config.get("model", "yolo11n.pt"),
+                    confidence_threshold=config.get("confidence", 0.3),
+                    generate_annotated_video=config.get("generate_video", True),
+                    process_every_n=config.get("skip_frames", 1),
+                )
             )
-            report_path = output_dir / "scout_report.txt"
-            with open(report_path, "w") as f:
-                f.write(report)
-            results_dict["scout_report"] = report
 
-        # Store in Supabase if configured
-        if supabase:
-            await store_results_in_supabase(job_id, config, results_dict)
+            results_dict = result.to_dict()
 
-        # Update job
-        job["status"] = "completed"
-        job["completed_at"] = datetime.now(timezone.utc).isoformat()
-        job["results_path"] = str(output_dir)
-        job["players_tracked"] = result.players_tracked
-        job["progress"] = 1.0
+            # Generate AI scout report if API key is available
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            if gemini_key:
+                match_context = {
+                    "competition": config.get("competition") or "Unknown Competition",
+                    "home_team": config.get("home_team") or "Unknown Home",
+                    "away_team": config.get("away_team") or "Unknown Away",
+                    "date": config.get("match_date") or "Unknown Date",
+                }
+                report = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: generate_scout_report(results_dict, match_context, gemini_key)
+                )
+                report_path = output_dir / "scout_report.txt"
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write(report)
+                results_dict["scout_report"] = report
 
-    except Exception as e:
-        job["status"] = "failed"
-        job["error"] = str(e)
-        job["progress"] = 0.0
-        print(f"Processing failed for job {job_id}: {e}")
-        import traceback
-        traceback.print_exc()
+            # Store in Supabase if configured
+            if supabase:
+                try:
+                    await store_results_in_supabase(job_id, config, results_dict)
+                except Exception as supa_err:
+                    print(f"[Supabase] WARNING: Failed to store results for {job_id}: {supa_err}")
+
+            # Update job in memory
+            job["status"] = "completed"
+            job["completed_at"] = datetime.now(timezone.utc).isoformat()
+            job["results_path"] = str(output_dir)
+            job["players_tracked"] = result.players_tracked
+            job["progress"] = 1.0
+            
+            # Update job in DB
+            meta = config.copy()
+            meta["players_tracked"] = result.players_tracked
+            meta["progress"] = 1.0
+
+            if USE_POSTGRES:
+                await db_update_job_status(
+                    job_id, "completed",
+                    results_path=job["results_path"],
+                    metadata=meta,
+                )
+            else:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        """
+                        UPDATE processing_jobs
+                        SET status = 'completed', completed_at = ?, results_path = ?, metadata = ?
+                        WHERE job_id = ?
+                        """,
+                        (job["completed_at"], job["results_path"], json.dumps(meta), job_id)
+                    )
+                    await db.commit()
+
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"] = str(e)
+            job["progress"] = 0.0
+            print(f"Processing failed for job {job_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Update DB with failure
+            if USE_POSTGRES:
+                await db_update_job_status(job_id, "failed", error=str(e))
+            else:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE processing_jobs SET status = 'failed', error = ? WHERE job_id = ?",
+                        (str(e), job_id)
+                    )
+                    await db.commit()
 
 
 async def store_results_in_supabase(job_id: str, config: dict, results: dict):
@@ -355,6 +715,7 @@ async def health():
         "status": "healthy",
         "supabase_connected": supabase is not None,
         "jobs_in_memory": len(jobs),
+        "max_upload_size_mb": MAX_UPLOAD_SIZE_MB,  # RL4-17: expose limit to frontend
     }
 
 
@@ -372,21 +733,48 @@ async def start_processing(
     skip_frames: int = Form(default=1),
 ):
     """Upload a match video and start processing."""
-    # Validate file type
+    # Validate file type first (cheap check)
     allowed_types = [
         "video/mp4", "video/avi", "video/quicktime",
         "video/x-msvideo", "video/webm",
     ]
-    if video.content_type not in allowed_types:
+    if video.content_type and video.content_type not in allowed_types:
         raise HTTPException(400, f"Unsupported video type: {video.content_type}")
 
     # Create job
     job_id = str(uuid.uuid4())[:12]
-    video_path = UPLOAD_DIR / f"{job_id}_{video.filename}"
+    # RL4-1: Sanitize user-supplied filename to prevent path traversal
+    safe_filename = _sanitize_filename(video.filename)
+    video_path = UPLOAD_DIR / f"{job_id}_{safe_filename}"
 
-    # Save uploaded video
-    with open(video_path, "wb") as f:
-        shutil.copyfileobj(video.file, f)
+    # Save uploaded video with streaming size check.
+    # video.size can be None for chunked/streamed uploads, so we
+    # enforce the limit during the actual write.
+    bytes_written = 0
+    try:
+        with open(video_path, "wb") as f:
+            while True:
+                chunk = await video.read(1024 * 1024)  # 1MB chunks
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_SIZE_BYTES:
+                    raise HTTPException(
+                        413,
+                        f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB}MB. "
+                        f"Upload exceeded limit at {bytes_written / 1024 / 1024:.0f}MB."
+                    )
+                f.write(chunk)
+    except HTTPException:
+        # Clean up partial file on size violation
+        if video_path.exists():
+            video_path.unlink()
+        raise
+    except Exception as e:
+        # Clean up partial file on any write error
+        if video_path.exists():
+            video_path.unlink()
+        raise HTTPException(500, f"Failed to save uploaded video: {e}")
 
     # Create job record
     config = {
@@ -400,15 +788,35 @@ async def start_processing(
         "skip_frames": skip_frames,
     }
 
-    jobs[job_id] = {
+    job_record = {
         "job_id": job_id,
         "status": "queued",
-        "video_filename": video.filename,
+        "video_filename": safe_filename,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "progress": 0.0,
         "players_tracked": 0,
-        **{k: v for k, v in config.items()},
+        **config
     }
+    jobs[job_id] = job_record
+    
+    # Persist job to DB
+    if USE_POSTGRES:
+        await db_insert_job(job_id, "queued", safe_filename, config)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                INSERT INTO processing_jobs (
+                    job_id, status, video_filename, results_path, error,
+                    created_at, completed_at, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id, "queued", safe_filename, None, None,
+                    job_record["created_at"], None, json.dumps(config)
+                )
+            )
+            await db.commit()
 
     # Start background processing
     background_tasks.add_task(process_video_task, job_id, str(video_path), config)
@@ -417,6 +825,7 @@ async def start_processing(
         "job_id": job_id,
         "status": "queued",
         "message": "Video uploaded. Processing started.",
+        "file_size_mb": round(bytes_written / 1024 / 1024, 1),
     }
 
 
@@ -437,6 +846,9 @@ async def get_results(job_id: str):
     job = jobs[job_id]
     if job["status"] != "completed":
         return {"status": job["status"], "message": "Processing not yet complete"}
+
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
 
     results_path = Path(job["results_path"]) / "tracking_results.json"
     if not results_path.exists():
@@ -464,7 +876,13 @@ async def get_annotated_video(job_id: str):
     if job["status"] != "completed":
         raise HTTPException(400, "Processing not yet complete")
 
-    video_path = Path(job["results_path"]) / "annotated_output.mp4"
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
+
+    # RL4-5: Validate path stays within RESULTS_DIR
+    video_path = _validate_path_containment(
+        Path(job["results_path"]) / "annotated_output.mp4", RESULTS_DIR
+    )
     if not video_path.exists():
         raise HTTPException(404, "Annotated video not available")
 
@@ -489,8 +907,14 @@ async def get_video_frame(job_id: str, frame_number: int):
     if job["status"] != "completed":
         raise HTTPException(400, "Processing not yet complete")
 
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not set for this job")
+
     # Try annotated video first, fall back to original
-    video_path = Path(job["results_path"]) / "annotated_output.mp4"
+    # RL4-5: Validate path stays within RESULTS_DIR
+    video_path = _validate_path_containment(
+        Path(job["results_path"]) / "annotated_output.mp4", RESULTS_DIR
+    )
     if not video_path.exists():
         # Try to find original upload
         uploads_dir = Path("uploads")
@@ -520,7 +944,13 @@ async def get_video_frame(job_id: str, frame_number: int):
         return StreamingResponse(
             io.BytesIO(buffer.tobytes()),
             media_type="image/jpeg",
-            headers={"Content-Disposition": f"inline; filename=frame_{frame_number}.jpg"}
+            headers={
+                "Content-Disposition": f"inline; filename=frame_{frame_number}.jpg",
+                # Allow the browser to cache frames for 5 minutes to reduce
+                # redundant cv2.VideoCapture opens when the SAM3 slider is
+                # dragged back and forth over the same region.
+                "Cache-Control": "public, max-age=300",
+            }
         )
     finally:
         cap.release()
@@ -537,6 +967,9 @@ async def get_video_info(job_id: str):
     job = jobs[job_id]
     if job["status"] != "completed":
         raise HTTPException(400, "Processing not yet complete")
+
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
 
     video_path = Path(job["results_path"]) / "annotated_output.mp4"
     if not video_path.exists():
@@ -579,6 +1012,9 @@ async def get_player_csv(job_id: str):
     if job["status"] != "completed":
         raise HTTPException(400, "Processing not yet complete")
 
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
+
     csv_path = Path(job["results_path"]) / "player_summary.csv"
     if not csv_path.exists():
         raise HTTPException(404, "CSV not available")
@@ -616,6 +1052,10 @@ async def get_job_tracks(job_id: str):
     if job["status"] != "completed":
         return {"status": job["status"], "message": "Processing not yet complete"}
 
+    # Guard against missing results_path (e.g. job completed but paths not set)
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
+
     results_path = Path(job["results_path"]) / "tracking_results.json"
     if not results_path.exists():
         raise HTTPException(500, "Results file not found")
@@ -649,7 +1089,7 @@ async def get_job_tracks(job_id: str):
             player = players_db.get(assignment["player_id"])
             track_info["assignment"] = {
                 "player_id": assignment["player_id"],
-                "player_name": player["name"] if player else "Unknown",
+                "player_name": player["name"] if player else "(Deleted Player)",
                 "assigned_at": assignment["assigned_at"],
                 "notes": assignment.get("notes"),
             }
@@ -669,7 +1109,7 @@ async def get_job_tracks(job_id: str):
 
 @app.post("/results/{job_id}/tracks/{track_id}/assign")
 async def assign_track(job_id: str, track_id: int, assignment: TrackAssignment):
-    """Assign a track to an existing player."""
+    """Assign a track to an existing player (SQLite)."""
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
 
@@ -677,116 +1117,138 @@ async def assign_track(job_id: str, track_id: int, assignment: TrackAssignment):
     if job["status"] != "completed":
         raise HTTPException(400, "Job not yet completed")
 
-    # Verify player exists
-    if assignment.player_id not in players_db:
-        raise HTTPException(404, f"Player {assignment.player_id} not found")
+    # Guard against missing results_path
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
 
-    # Verify track exists in results
-    results_path = Path(job["results_path"]) / "tracking_results.json"
-    if not results_path.exists():
-        raise HTTPException(500, "Results file not found")
+    # Update in DB
+    if USE_POSTGRES:
+        if not await db_player_exists(assignment.player_id):
+            raise HTTPException(404, f"Player {assignment.player_id} not found")
+        await db_upsert_track_assignment(job_id, track_id, assignment.player_id, assignment.notes)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT 1 FROM players WHERE id=?", (assignment.player_id,)) as cursor:
+                if not await cursor.fetchone():
+                    raise HTTPException(404, f"Player {assignment.player_id} not found")
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO track_assignments (job_id, track_id, player_id, assigned_at, notes)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (job_id, track_id, assignment.player_id, datetime.now(timezone.utc).isoformat(), assignment.notes)
+            )
+            await db.commit()
 
-    with open(results_path) as f:
-        results = json.load(f)
-
-    if str(track_id) not in results.get("players", {}):
-        raise HTTPException(404, f"Track {track_id} not found in job results")
-
-    # Create or update assignment
+    # Create or update assignment in cache
     if job_id not in track_assignments:
         track_assignments[job_id] = {}
 
-    track_assignments[job_id][track_id] = {
+    ass_dict = {
         "player_id": assignment.player_id,
         "assigned_at": datetime.now(timezone.utc).isoformat(),
         "notes": assignment.notes,
     }
+    track_assignments[job_id][track_id] = ass_dict
 
-    player = players_db[assignment.player_id]
     return {
-        "message": f"Track #{track_id} assigned to {player['name']}",
-        "assignment": track_assignments[job_id][track_id],
+        "message": f"Track #{track_id} assigned to player {assignment.player_id}",
+        "assignment": ass_dict,
     }
 
 
 @app.post("/results/{job_id}/tracks/{track_id}/create-player")
 async def create_player_from_track(job_id: str, track_id: int, player_data: PlayerCreateFromTrack):
-    """Create a new player and assign this track to them."""
-    global next_player_id
-
+    """Create a new player and assign this track to them (SQLite)."""
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
+        
+    # Generate new ID
+    new_id = str(uuid.uuid4())
+    
+    # Store Player in DB
+    player_db_data = {
+        "name": player_data.name, "age": player_data.age, "nation": player_data.nation,
+        "position": player_data.position, "club": player_data.club, "league": player_data.league,
+        "verificationStatus": "unverified", "reliabilityScore": 0, "dataConfidence": 0,
+        "scoutNotes": player_data.notes or f"Created from video tracking (Job: {job_id}, Track: #{track_id})",
+    }
+    if USE_POSTGRES:
+        await db_insert_player(new_id, player_db_data)
+        await db_upsert_track_assignment(job_id, track_id, new_id, player_data.notes)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                INSERT INTO players (
+                    id, name, age, nation, position, club, league,
+                    verification_status, reliability_score, data_confidence_score,
+                    added_on, stats, medical, behavioral, contract, scout_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id, player_data.name, player_data.age, player_data.nation,
+                    player_data.position, player_data.club, player_data.league,
+                    "unverified", 0, 0, datetime.now().isoformat(),
+                    "{}", "{}", "{}", "{}",
+                    player_data.notes or f"Created from video tracking (Job: {job_id}, Track: #{track_id})"
+                )
+            )
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO track_assignments (job_id, track_id, player_id, assigned_at, notes)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (job_id, track_id, new_id, datetime.now(timezone.utc).isoformat(), player_data.notes)
+            )
+            await db.commit()
 
-    job = jobs[job_id]
-    if job["status"] != "completed":
-        raise HTTPException(400, "Job not yet completed")
-
-    # Verify track exists
-    results_path = Path(job["results_path"]) / "tracking_results.json"
-    if not results_path.exists():
-        raise HTTPException(500, "Results file not found")
-
-    with open(results_path) as f:
-        results = json.load(f)
-
-    if str(track_id) not in results.get("players", {}):
-        raise HTTPException(404, f"Track {track_id} not found in job results")
-
-    # Create the new player
+    # Update caches
     new_player = {
-        "id": next_player_id,
+        "id": new_id,
         "name": player_data.name,
         "age": player_data.age,
         "nation": player_data.nation,
-        "flag": player_data.flag,
         "club": player_data.club,
         "league": player_data.league,
         "position": player_data.position,
-        "photo": None,
         "verificationStatus": "unverified",
-        "reliabilityScore": 0,
-        "dataConfidence": 0,
-        "stats": {"appearances": 0, "goals": 0, "assists": 0, "minutes": 0, "cards": {"yellow": 0, "red": 0}},
-        "career": [],
-        "medical": {"injuries": None, "lastInjury": "None", "clearance": "Unknown", "fitnessScore": None},
-        "behavioral": {"training": None, "discipline": "Unknown", "languages": [], "leadership": "N/A"},
-        "contract": {"status": "Unknown", "expiry": "Unknown", "compensation": "Unknown", "tms": "Unknown"},
-        "matchClips": 0,
-        "fullMatches": 0,
-        "scoutNotes": player_data.notes or f"Created from video tracking (Job: {job_id}, Track: #{track_id})",
+        "scoutNotes": player_data.notes or f"Created from video tracking (Job: {job_id}, Track: #{track_id})"
     }
-
-    players_db[next_player_id] = new_player
-
-    # Assign track to new player
+    players_db[new_id] = new_player
+    
     if job_id not in track_assignments:
         track_assignments[job_id] = {}
-
-    track_assignments[job_id][track_id] = {
-        "player_id": next_player_id,
+        
+    ass_dict = {
+        "player_id": new_id,
         "assigned_at": datetime.now(timezone.utc).isoformat(),
         "notes": player_data.notes,
     }
-
-    next_player_id += 1
+    track_assignments[job_id][track_id] = ass_dict
 
     return {
-        "message": f"Created player '{new_player['name']}' and assigned Track #{track_id}",
+        "message": f"Created player '{player_data.name}' and assigned Track #{track_id}",
         "player": new_player,
-        "assignment": track_assignments[job_id][track_id],
+        "assignment": ass_dict,
     }
 
 
 @app.delete("/results/{job_id}/tracks/{track_id}/unassign")
 async def unassign_track(job_id: str, track_id: int):
     """Remove track assignment."""
-    if job_id not in jobs:
-        raise HTTPException(404, "Job not found")
-
-    if job_id not in track_assignments or track_id not in track_assignments[job_id]:
-        raise HTTPException(404, "Assignment not found")
-
-    del track_assignments[job_id][track_id]
+    if USE_POSTGRES:
+        await db_delete_track_assignment(job_id, track_id)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM track_assignments WHERE job_id = ? AND track_id = ?",
+                (job_id, track_id)
+            )
+            await db.commit()
+    
+    if job_id in track_assignments and track_id in track_assignments[job_id]:
+        del track_assignments[job_id][track_id]
 
     return {"message": f"Track #{track_id} unassigned"}
 
@@ -821,7 +1283,7 @@ async def get_players(
 
 
 @app.get("/players/{player_id}")
-async def get_player(player_id: int):
+async def get_player(player_id: str):
     """Get a single player by ID."""
     if player_id not in players_db:
         raise HTTPException(404, "Player not found")
@@ -831,27 +1293,94 @@ async def get_player(player_id: int):
 @app.post("/players")
 async def create_player(player: PlayerCreate):
     """Create a new player."""
-    global next_player_id
     player_dict = player.model_dump()
-    player_dict["id"] = next_player_id
-    players_db[next_player_id] = player_dict
-    next_player_id += 1
+    new_id = str(uuid.uuid4())
+    player_dict["id"] = new_id
+
+    # Store in DB
+    if USE_POSTGRES:
+        await db_insert_player(new_id, player_dict)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                INSERT INTO players (
+                    id, name, age, nation, position, club, league,
+                    verification_status, reliability_score, data_confidence_score,
+                    added_on, stats, medical, behavioral, contract, scout_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id, player_dict["name"], player_dict["age"], player_dict["nation"],
+                    player_dict["position"], player_dict["club"], player_dict["league"],
+                    player_dict.get("verificationStatus", "unverified"),
+                    player_dict.get("reliabilityScore", 0), player_dict.get("dataConfidence", 0),
+                    datetime.now().isoformat(),
+                    json.dumps(player_dict.get("stats", {})),
+                    json.dumps(player_dict.get("medical", {})),
+                    json.dumps(player_dict.get("behavioral", {})),
+                    json.dumps(player_dict.get("contract", {})),
+                    player_dict.get("scoutNotes", "")
+                )
+            )
+            await db.commit()
+
+    # Update cache
+    players_db[new_id] = player_dict
+    
     return player_dict
 
 
 @app.put("/players/{player_id}")
-async def update_player(player_id: int, player_update: PlayerUpdate):
+async def update_player(player_id: str, player_update: PlayerUpdate):
     """Update an existing player."""
     if player_id not in players_db:
-        raise HTTPException(404, "Player not found")
+        if USE_POSTGRES:
+            if not await db_player_exists(player_id):
+                raise HTTPException(404, "Player not found")
+        else:
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute("SELECT 1 FROM players WHERE id = ?", (player_id,)) as cursor:
+                    if not await cursor.fetchone():
+                        raise HTTPException(404, "Player not found")
 
-    existing = players_db[player_id]
+    existing = players_db.get(player_id, {})
     update_data = player_update.model_dump(exclude_unset=True)
 
+    # Merge updates
     for key, value in update_data.items():
-        if value is not None:
-            existing[key] = value if not isinstance(value, BaseModel) else value.model_dump()
+        existing[key] = value if not isinstance(value, BaseModel) else value.model_dump()
 
+    # Persist to DB
+    if USE_POSTGRES:
+        await db_update_player(player_id, existing)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                UPDATE players SET
+                    name = ?, age = ?, nation = ?, position = ?, club = ?, league = ?,
+                    verification_status = ?, reliability_score = ?, data_confidence_score = ?,
+                    stats = ?, medical = ?, behavioral = ?, contract = ?, scout_notes = ?
+                WHERE id = ?
+                """,
+                (
+                    existing.get("name"), existing.get("age"), existing.get("nation"),
+                    existing.get("position"), existing.get("club"), existing.get("league"),
+                    existing.get("verificationStatus"), existing.get("reliabilityScore"),
+                    existing.get("dataConfidence"),
+                    json.dumps(existing.get("stats", {})),
+                    json.dumps(existing.get("medical", {})),
+                    json.dumps(existing.get("behavioral", {})),
+                    json.dumps(existing.get("contract", {})),
+                    existing.get("scoutNotes", ""),
+                    player_id
+                )
+            )
+            await db.commit()
+
+    # Update cache
+    players_db[player_id] = existing
     return existing
 
 
@@ -886,17 +1415,42 @@ async def get_shortlist():
 
 
 @app.post("/shortlist/{player_id}")
-async def add_to_shortlist(player_id: int):
+async def add_to_shortlist(player_id: str):
     """Add a player to the shortlist."""
     if player_id not in players_db:
         raise HTTPException(404, "Player not found")
+
+    user_id = "1"  # MVP Admin
+
+    if USE_POSTGRES:
+        await db_upsert_shortlist(user_id, player_id)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO shortlists (user_id, player_id) VALUES (?, ?)",
+                (user_id, player_id)
+            )
+            await db.commit()
+    
     shortlist_db.add(player_id)
     return {"message": f"Player {player_id} added to shortlist", "shortlist": list(shortlist_db)}
 
 
 @app.delete("/shortlist/{player_id}")
-async def remove_from_shortlist(player_id: int):
+async def remove_from_shortlist(player_id: str):
     """Remove a player from the shortlist."""
+    user_id = "1"  # MVP Admin
+
+    if USE_POSTGRES:
+        await db_delete_shortlist(user_id, player_id)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM shortlists WHERE user_id = ? AND player_id = ?",
+                (user_id, player_id)
+            )
+            await db.commit()
+        
     shortlist_db.discard(player_id)
     return {"message": f"Player {player_id} removed from shortlist", "shortlist": list(shortlist_db)}
 
@@ -908,38 +1462,74 @@ async def remove_from_shortlist(player_id: int):
 @app.get("/sam3/status")
 async def sam3_status():
     """Check SAM3 module status and availability."""
+    # Modal backend check
+    if SAM3_BACKEND == "modal" and modal_sam3_client:
+        try:
+            return modal_sam3_client.health_check()
+        except Exception as e:
+            return {"available": False, "model_loaded": False, "error": str(e), "backend": "modal"}
+
+    # Local backend check
     if not SAM3_AVAILABLE:
         return {
             "available": False,
             "model_loaded": False,
             "error": "SAM3 module not installed. Install with: pip install transformers huggingface-hub",
+            "backend": "local",
         }
 
     try:
         status = sam3_processor.get_status()
+        status["backend"] = "local"
         return SAM3StatusResponse(**status)
     except Exception as e:
-        return {
-            "available": False,
-            "model_loaded": False,
-            "error": str(e),
-        }
+        return {"available": False, "model_loaded": False, "error": str(e), "backend": "local"}
 
 
 @app.post("/sam3/segment")
 async def sam3_segment(request: SegmentationRequest):
     """
     Perform text-prompted segmentation on a single frame.
-
-    Example:
-        POST /sam3/segment
-        {
-            "job_id": "abc123",
-            "frame_number": 100,
-            "prompt": "players in blue jerseys",
-            "confidence_threshold": 0.5
-        }
+    Routes to Modal GPU or local CPU based on SAM3_BACKEND env var.
     """
+    # Modal backend path
+    if SAM3_BACKEND == "modal" and modal_sam3_client:
+        try:
+            # Need to get image as base64 for Modal
+            if request.image_base64:
+                image_b64 = request.image_base64
+            elif request.job_id:
+                # Extract frame and encode as base64
+                import cv2
+                import base64 as b64mod
+                frame = sam3_processor._extract_frame_from_job(
+                    request.job_id, request.frame_number or 0
+                ) if SAM3_AVAILABLE else None
+                if frame is None:
+                    raise HTTPException(400, "Cannot extract frame — local SAM3 module needed for frame extraction")
+                _, buffer = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                image_b64 = b64mod.b64encode(buffer).decode('utf-8')
+            else:
+                raise HTTPException(400, "Must provide image_base64 or job_id+frame_number")
+
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: modal_sam3_client.segment_frame(
+                    image_base64=image_b64,
+                    prompt=request.prompt,
+                    confidence_threshold=request.confidence_threshold,
+                    return_masks=request.return_masks,
+                    return_bboxes=request.return_bboxes,
+                )
+            )
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Modal segmentation failed: {e}")
+
+    # Local backend path
     if not SAM3_AVAILABLE:
         raise HTTPException(503, "SAM3 module not available")
 
@@ -1042,12 +1632,11 @@ async def sam3_enhance_tracks(job_id: str, request: EnhanceTracksRequest):
 # Seed Demo Data
 # ---------------------------------------------------------------------------
 
-def seed_demo_data():
-    """Seed the database with demo players on startup."""
-    global next_player_id
-
+# Seed data logic is now in seed_demo_data_async below
+async def seed_demo_data_async():
+    """Seed DB with demo players."""
     demo_players = [
-        {
+            {
             "name": "Jean-Baptiste Mugisha", "age": 22, "nation": "Rwanda", "flag": "🇷🇼",
             "club": "APR FC", "league": "Rwanda Premier League", "position": "CM",
             "photo": None, "verificationStatus": "verified",
@@ -1078,70 +1667,39 @@ def seed_demo_data():
             "contract": {"status": "Active", "expiry": "Dec 2026", "compensation": "Eligible", "tms": "Registered"},
             "matchClips": 22, "fullMatches": 10,
             "scoutNotes": "Electric pace, direct runner. Decision-making improving. High ceiling. MLS or Championship level.",
-        },
-        {
-            "name": "Emmanuel Habimana", "age": 24, "nation": "Rwanda", "flag": "🇷🇼",
-            "club": "Kiyovu Sports", "league": "Rwanda Premier League", "position": "CB",
-            "photo": None, "verificationStatus": "partial",
-            "reliabilityScore": 64, "dataConfidence": 58,
-            "stats": {"appearances": 55, "goals": 3, "assists": 2, "minutes": 4700, "cards": {"yellow": 11, "red": 1}},
-            "career": [
-                {"club": "Kiyovu Sports", "period": "2022–Present", "level": "1st Division", "apps": 55},
-                {"club": "Musanze FC", "period": "2020–2022", "level": "2nd Division", "apps": 38},
-                {"club": "Unknown Academy", "period": "2018–2020", "level": "Academy", "apps": None},
-            ],
-            "medical": {"injuries": 3, "lastInjury": "ACL reconstruction (2023)", "clearance": "Full - monitored", "fitnessScore": 78},
-            "behavioral": {"training": 82, "discipline": "Good", "languages": ["Kinyarwanda", "French"], "leadership": "N/A"},
-            "contract": {"status": "Active", "expiry": "June 2026", "compensation": "Disputed", "tms": "Pending"},
-            "matchClips": 5, "fullMatches": 2,
-            "scoutNotes": "Strong aerial presence, good reading of the game. ACL recovery looks good but needs monitoring. Career gap 2018-2020 unverified.",
-        },
-        {
-            "name": "Sipho Ndlovu", "age": 19, "nation": "South Africa", "flag": "🇿🇦",
-            "club": "Stellenbosch FC", "league": "PSL", "position": "ST",
-            "photo": None, "verificationStatus": "verified",
-            "reliabilityScore": 78, "dataConfidence": 85,
-            "stats": {"appearances": 28, "goals": 11, "assists": 3, "minutes": 1900, "cards": {"yellow": 2, "red": 0}},
-            "career": [
-                {"club": "Stellenbosch FC", "period": "2025–Present", "level": "1st Division", "apps": 28},
-                {"club": "Stellenbosch Academy", "period": "2022–2025", "level": "Academy", "apps": 52},
-            ],
-            "medical": {"injuries": 0, "lastInjury": "None", "clearance": "Full", "fitnessScore": 93},
-            "behavioral": {"training": 90, "discipline": "Very Good", "languages": ["English", "Afrikaans", "Xhosa"], "leadership": "Quiet but focused"},
-            "contract": {"status": "Active", "expiry": "June 2028", "compensation": "Eligible", "tms": "Registered"},
-            "matchClips": 18, "fullMatches": 8,
-            "scoutNotes": "Natural finisher, good movement in the box. Strong for his age. NCAA D1 programs already inquiring. Could go Europe or USA.",
-        },
-        {
-            "name": "Patrick Irakoze", "age": 21, "nation": "Burundi", "flag": "🇧🇮",
-            "club": "AS Kigali", "league": "Rwanda Premier League", "position": "RB",
-            "photo": None, "verificationStatus": "unverified",
-            "reliabilityScore": 38, "dataConfidence": 29,
-            "stats": {"appearances": 30, "goals": 1, "assists": 7, "minutes": 2400, "cards": {"yellow": 8, "red": 2}},
-            "career": [
-                {"club": "AS Kigali", "period": "2024–Present", "level": "1st Division", "apps": 30},
-                {"club": "Unknown (Burundi)", "period": "2021–2024", "level": "Unknown", "apps": None},
-            ],
-            "medical": {"injuries": None, "lastInjury": "No records", "clearance": "Unknown", "fitnessScore": None},
-            "behavioral": {"training": None, "discipline": "Unknown", "languages": ["Kirundi", "French"], "leadership": "N/A"},
-            "contract": {"status": "Active", "expiry": "Dec 2025", "compensation": "Unknown", "tms": "Not registered"},
-            "matchClips": 2, "fullMatches": 0,
-            "scoutNotes": "Athletically gifted, aggressive in duels. Significant data gaps — Burundi career unverified. High ceiling but high risk profile.",
-        },
+        }
     ]
 
-    for player_data in demo_players:
-        player_data["id"] = next_player_id
-        players_db[next_player_id] = player_data
-        next_player_id += 1
+    if USE_POSTGRES:
+        for p in demo_players:
+            pid = str(uuid.uuid4())
+            await db_insert_player(pid, p)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            for p in demo_players:
+                pid = str(uuid.uuid4())
+                await db.execute(
+                    """
+                    INSERT INTO players (
+                        id, name, age, nation, position, club, league,
+                        verification_status, reliability_score, data_confidence_score,
+                        added_on, stats, medical, behavioral, contract, scout_notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        pid, p.get("name"), p.get("age"), p.get("nation"), p.get("position"),
+                        p.get("club"), p.get("league"), p.get("verificationStatus", "unverified"),
+                        p.get("reliabilityScore", 0), p.get("dataConfidence", 0),
+                        datetime.now().isoformat(),
+                        json.dumps(p.get("stats", {})),
+                        json.dumps(p.get("medical", {})),
+                        json.dumps(p.get("behavioral", {})),
+                        json.dumps(p.get("contract", {})),
+                        p.get("scoutNotes", "")
+                    )
+                )
+            await db.commit()
+    print(f"[Seed] Added {len(demo_players)} demo players")
 
-    # Seed initial shortlist
-    shortlist_db.add(1)  # Jean-Baptiste
-    shortlist_db.add(2)  # Thabo
-    shortlist_db.add(4)  # Sipho
 
-    print(f"Seeded {len(demo_players)} demo players and {len(shortlist_db)} shortlisted players")
-
-
-# Seed data on startup
-seed_demo_data()
+# Startup logic moved to lifespan handler (RL4-9)

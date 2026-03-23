@@ -9,12 +9,14 @@ import { PlayerProfile } from '@/components/PlayerProfile';
 import { VideoUpload } from '@/components/VideoUpload';
 import { ComparisonView } from '@/components/ComparisonView';
 import { SAM3Panel } from '@/components/SAM3Panel';
+import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import {
   getPlayers,
   getLeagues,
   getShortlist,
   addToShortlist,
   removeFromShortlist,
+  API_BASE,
 } from '@/lib/api';
 
 export default function Home() {
@@ -29,37 +31,65 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterNation, setFilterNation] = useState("All");
   const [sidebarSection, setSidebarSection] = useState("database");
-  const [shortlist, setShortlist] = useState<number[]>([]);
-  const [compareList, setCompareList] = useState<number[]>([]);
+  const [shortlist, setShortlist] = useState<string[]>([]);
+  const [compareList, setCompareList] = useState<string[]>(() => {
+    // RL4-7: Restore compareList from sessionStorage
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = sessionStorage.getItem('scoutbase_compareList');
+        return saved ? JSON.parse(saved) : [];
+      } catch { /* ignore parse errors */ }
+    }
+    return [];
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Fetch initial data on mount
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const [playersRes, leaguesRes, shortlistRes] = await Promise.all([
-          getPlayers(),
-          getLeagues(),
-          getShortlist(),
-        ]);
-        setPlayers(playersRes.players);
-        setLeagueIntel(leaguesRes.leagues);
-        setShortlist(shortlistRes.shortlist);
-      } catch (err) {
-        console.error('Failed to fetch data:', err);
-        setError(err instanceof Error ? err.message : 'Failed to load data');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
+  // Fetch initial data on mount + periodic refresh
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [playersRes, leaguesRes, shortlistRes] = await Promise.all([
+        getPlayers(),
+        getLeagues(),
+        getShortlist(),
+      ]);
+      setPlayers(playersRes.players);
+      setLeagueIntel(leaguesRes.leagues);
+      // Ensure backend returns string IDs. If not, map them here?
+      // Since backend is updated, we assume strings.
+      setShortlist(shortlistRes.shortlist.map(String));
+    } catch (err) {
+      console.error('Failed to fetch data:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load data');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
+  // Silent refresh — updates all data without showing loading spinner (RL3-2)
+  const refreshData = useCallback(async () => {
+    try {
+      const [playersRes, leaguesRes, shortlistRes] = await Promise.all([
+        getPlayers(),
+        getLeagues(),
+        getShortlist(),
+      ]);
+      setPlayers(playersRes.players);
+      setLeagueIntel(leaguesRes.leagues);
+      setShortlist(shortlistRes.shortlist.map(String));
+    } catch { /* silently retry next interval */ }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+    // Refresh ALL data every 30s to catch mutations from TrackAssignment etc (RL3-2)
+    const interval = setInterval(refreshData, 30000);
+    return () => clearInterval(interval);
+  }, [fetchData, refreshData]);
+
   // Shortlist toggle with API persistence
-  const toggleShortlist = useCallback(async (playerId: number) => {
+  const toggleShortlist = useCallback(async (playerId: string) => {
     const isInShortlist = shortlist.includes(playerId);
 
     // Optimistic update
@@ -86,12 +116,17 @@ export default function Home() {
     }
   }, [shortlist]);
 
-  const toggleCompare = (playerId: number) => {
-    setCompareList(prev =>
-      prev.includes(playerId)
+  const toggleCompare = (playerId: string) => {
+    setCompareList(prev => {
+      const next = prev.includes(playerId)
         ? prev.filter(id => id !== playerId)
-        : prev.length < 4 ? [...prev, playerId] : prev // Max 4 players
-    );
+        : prev.length < 4 ? [...prev, playerId] : prev;
+      // RL4-7: Persist to sessionStorage
+      if (typeof window !== 'undefined') {
+        try { sessionStorage.setItem('scoutbase_compareList', JSON.stringify(next)); } catch { /* ignore */ }
+      }
+      return next;
+    });
   };
 
   const handleRequestReport = (player: Player) => {
@@ -205,47 +240,27 @@ export default function Home() {
               <div style={{ fontWeight: 600, marginBottom: 8 }}>Failed to load data</div>
               <div style={{ fontSize: 13, opacity: 0.8 }}>{error}</div>
               <div style={{ fontSize: 12, marginTop: 12, color: COLORS.textDim }}>
-                Make sure the backend server is running at http://localhost:8000
+                Make sure the backend server is running at {API_BASE}
               </div>
             </div>
           </div>
         )}
 
         {/* Main Content - only show when not loading and no error */}
-        {!loading && !error && selectedPlayer ? (
-          <PlayerProfile
-            player={selectedPlayer}
-            onBack={() => setSelectedPlayer(null)}
-            onCompare={() => toggleCompare(selectedPlayer.id)}
-            isInCompare={compareList.includes(selectedPlayer.id)}
-            onToggleShortlist={toggleShortlist}
-            isInShortlist={shortlist.includes(selectedPlayer.id)}
-            onRequestReport={handleRequestReport}
-          />
-        ) : !loading && !error && sidebarSection === "database" ? (
-          <div>
-            {filteredPlayers.map(p => (
-              <PlayerRow
-                key={p.id}
-                player={p}
-                onClick={() => setSelectedPlayer(p)}
-                onCompare={() => toggleCompare(p.id)}
-                isInCompare={compareList.includes(p.id)}
-              />
-            ))}
-            {filteredPlayers.length === 0 && (
-              <div style={{ padding: 40, textAlign: 'center', color: COLORS.textDim }}>No players found</div>
-            )}
-          </div>
-        ) : !loading && !error && sidebarSection === "shortlist" ? (
-          <div>
-            <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>My Shortlist</h1>
-            {shortlist.length === 0 ? (
-              <div style={{ padding: 40, textAlign: 'center', color: COLORS.textDim }}>
-                No players in shortlist. Add players from the database.
-              </div>
-            ) : (
-              players.filter(p => shortlist.includes(p.id)).map(p => (
+        <ErrorBoundary fallbackTitle="Failed to render content">
+          {!loading && !error && selectedPlayer ? (
+            <PlayerProfile
+              player={selectedPlayer}
+              onBack={() => setSelectedPlayer(null)}
+              onCompare={(p) => toggleCompare(p.id)}
+              isInCompare={compareList.includes(selectedPlayer.id)}
+              onToggleShortlist={toggleShortlist}
+              isInShortlist={shortlist.includes(selectedPlayer.id)}
+              onRequestReport={handleRequestReport}
+            />
+          ) : !loading && !error && sidebarSection === "database" ? (
+            <div>
+              {filteredPlayers.map(p => (
                 <PlayerRow
                   key={p.id}
                   player={p}
@@ -253,56 +268,78 @@ export default function Home() {
                   onCompare={() => toggleCompare(p.id)}
                   isInCompare={compareList.includes(p.id)}
                 />
-              ))
-            )}
-          </div>
-        ) : !loading && !error && sidebarSection === "leagues" ? (
-          <div>
-            <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>League Intelligence</h1>
-            {leagueIntel.length === 0 ? (
-              <div style={{ padding: 40, textAlign: 'center', color: COLORS.textDim }}>No league data available</div>
-            ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 20 }}>
-                {leagueIntel.map((l, i) => (
-                  <div key={i} style={{ background: COLORS.card, padding: 24, borderRadius: 16, border: `1px solid ${COLORS.border}` }}>
-                    <div style={{ fontSize: 20, fontWeight: 700, display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
-                      {l.country} {l.name}
-                    </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                      <div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.accent }}>{l.strength}/10</div>
-                        <div style={{ fontSize: 10, color: COLORS.textDim }}>STRENGTH SCORE</div>
+              ))}
+              {filteredPlayers.length === 0 && (
+                <div style={{ padding: 40, textAlign: 'center', color: COLORS.textDim }}>No players found</div>
+              )}
+            </div>
+          ) : !loading && !error && sidebarSection === "shortlist" ? (
+            <div>
+              <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>My Shortlist</h1>
+              {shortlist.length === 0 ? (
+                <div style={{ padding: 40, textAlign: 'center', color: COLORS.textDim }}>
+                  No players in shortlist. Add players from the database.
+                </div>
+              ) : (
+                players.filter(p => shortlist.includes(p.id)).map(p => (
+                  <PlayerRow
+                    key={p.id}
+                    player={p}
+                    onClick={() => setSelectedPlayer(p)}
+                    onCompare={() => toggleCompare(p.id)}
+                    isInCompare={compareList.includes(p.id)}
+                  />
+                ))
+              )}
+            </div>
+          ) : !loading && !error && sidebarSection === "leagues" ? (
+            <div>
+              <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>League Intelligence</h1>
+              {leagueIntel.length === 0 ? (
+                <div style={{ padding: 40, textAlign: 'center', color: COLORS.textDim }}>No league data available</div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 20 }}>
+                  {leagueIntel.map((l, i) => (
+                    <div key={i} style={{ background: COLORS.card, padding: 24, borderRadius: 16, border: `1px solid ${COLORS.border}` }}>
+                      <div style={{ fontSize: 20, fontWeight: 700, display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                        {l.country} {l.name}
                       </div>
-                      <div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.blue }}>{l.reliability}%</div>
-                        <div style={{ fontSize: 10, color: COLORS.textDim }}>DATA ACCURACY</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                        <div>
+                          <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.accent }}>{l.strength}/10</div>
+                          <div style={{ fontSize: 10, color: COLORS.textDim }}>STRENGTH SCORE</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.blue }}>{l.reliability}%</div>
+                          <div style={{ fontSize: 10, color: COLORS.textDim }}>DATA ACCURACY</div>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: 20, fontSize: 11, padding: "6px 12px", borderRadius: 6, background: l.risk === "Low" ? COLORS.accentDim : COLORS.warningDim, color: l.risk === "Low" ? COLORS.accent : COLORS.warning, display: "inline-block", fontWeight: 700 }}>
+                        {l.risk} COMPLIANCE RISK
                       </div>
                     </div>
-                    <div style={{ marginTop: 20, fontSize: 11, padding: "6px 12px", borderRadius: 6, background: l.risk === "Low" ? COLORS.accentDim : COLORS.warningDim, color: l.risk === "Low" ? COLORS.accent : COLORS.warning, display: "inline-block", fontWeight: 700 }}>
-                      {l.risk} COMPLIANCE RISK
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : sidebarSection === "upload" ? (
-          <div>
-            <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>Upload Match Video</h1>
-            <VideoUpload />
-          </div>
-        ) : sidebarSection === "sam3" ? (
-          <SAM3Panel />
-        ) : !loading && !error && sidebarSection === "compare" ? (
-          <div>
-            <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>Player Comparison</h1>
-            <ComparisonView
-              players={players.filter(p => compareList.includes(p.id))}
-              onRemove={(id) => setCompareList(prev => prev.filter(pid => pid !== id))}
-              onViewProfile={(player) => setSelectedPlayer(player)}
-            />
-          </div>
-        ) : null}
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : !loading && !error && sidebarSection === "upload" ? (
+            <div>
+              <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>Upload Match Video</h1>
+              <VideoUpload />
+            </div>
+          ) : !loading && !error && sidebarSection === "sam3" ? (
+            <SAM3Panel />
+          ) : !loading && !error && sidebarSection === "compare" ? (
+            <div>
+              <h1 style={{ margin: "0 0 24px", fontSize: 24, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>Player Comparison</h1>
+              <ComparisonView
+                players={players.filter(p => compareList.includes(p.id))}
+                onRemove={(id) => setCompareList(prev => prev.filter(pid => pid !== id))}
+                onViewProfile={(player) => setSelectedPlayer(player)}
+              />
+            </div>
+          ) : null}
+        </ErrorBoundary>
       </main>
 
       {/* Mobile responsive styles */}

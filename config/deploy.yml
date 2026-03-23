@@ -1,0 +1,68 @@
+# Kamal 2 Deployment Configuration
+# ==================================
+# Deploy ScoutBase API to VPS 3 (jaiko) with zero-downtime
+
+service: scoutbase-api
+image: scoutbase-api
+
+servers:
+  web:
+    hosts:
+      - 204.168.129.116
+    options:
+      memory: 4g
+
+proxy:
+  host: api.scoutbase.africa
+  ssl: true
+  app_port: 8000
+  healthcheck:
+    path: /health
+    interval: 30
+    timeout: 5
+
+registry:
+  server: ghcr.io
+  username:
+    - KAMAL_REGISTRY_USERNAME
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  dockerfile: Dockerfile.prod
+  context: .
+
+accessories:
+  inference:
+    image: roboflow/inference:latest
+    host: 204.168.129.116
+    port: 9001
+    env:
+      clear:
+        ROBOFLOW_API_KEY: ""
+    options:
+      memory: 2g
+
+volumes:
+  - scoutbase_uploads:/app/uploads
+  - scoutbase_results:/app/results
+  - scoutbase_checkpoints:/app/checkpoints
+  - scoutbase_data:/app/data
+
+env:
+  clear:
+    SAM3_BACKEND: modal
+    SAM3_DEVICE: cpu
+    SAM3_VARIANT: base
+    SAM3_LAZY_LOAD: "true"
+  secret:
+    - DATABASE_URL
+    - SUPABASE_URL
+    - SUPABASE_SERVICE_KEY
+    - SUPABASE_DB_PASSWORD
+    - HF_TOKEN
+    - MODAL_TOKEN_ID
+    - MODAL_TOKEN_SECRET
+    - GEMINI_API_KEY
+    - ANTHROPIC_API_KEY
+    - ALLOWED_ORIGINS

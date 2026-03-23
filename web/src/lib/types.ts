@@ -40,7 +40,7 @@ export interface ContractInfo {
 }
 
 export interface Player {
-    id: number;
+    id: string;
     name: string;
     age: number;
     nation: string;
@@ -76,7 +76,7 @@ export interface LeagueIntel {
 // ---------------------------------------------------------------------------
 
 export interface TrackAssignment {
-    player_id: number;
+    player_id: string;
     player_name: string;
     assigned_at: string;
     notes?: string;

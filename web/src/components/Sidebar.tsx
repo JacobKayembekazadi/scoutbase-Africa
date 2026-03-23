@@ -1,4 +1,5 @@
 import React from 'react';
+import { handleSignOut } from '@/lib/actions';
 import { COLORS } from '@/lib/constants';
 
 interface SidebarProps {
@@ -104,10 +105,30 @@ export const Sidebar = ({ activeSection, onSectionChange, shortlistCount, compar
                     </button>
                 ))}
 
-                <div style={{ marginTop: "auto", padding: "12px 8px", borderTop: `1px solid ${COLORS.border}` }}>
-                    <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 4 }}>DEMO ACCOUNT</div>
-                    <div style={{ fontSize: 11, color: COLORS.textDim }}>Sloe Labs</div>
-                    <div style={{ fontSize: 9, color: COLORS.textMuted }}>Pro Plan · 5 users</div>
+                <div style={{ marginTop: "auto", padding: "12px 0", borderTop: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", gap: 2 }}>
+                    <div style={{ padding: "0 8px" }}>
+                        <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 2 }}>CURRENT USER</div>
+                        <div style={{ fontSize: 11, color: COLORS.textDim, fontWeight: 600 }}>scoutbase-admin</div>
+                    </div>
+                    <button
+                        onClick={() => handleSignOut()}
+                        style={{
+                            marginTop: 8,
+                            width: "100%",
+                            padding: "6px 8px",
+                            background: "transparent",
+                            border: `1px solid ${COLORS.border}`,
+                            borderRadius: 6,
+                            color: COLORS.danger,
+                            fontSize: 11,
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            textAlign: "left",
+                            display: "flex", alignItems: "center", gap: 6
+                        }}
+                    >
+                        <span>🚪</span> Sign Out
+                    </button>
                 </div>
             </nav>
 

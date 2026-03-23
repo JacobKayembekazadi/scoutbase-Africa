@@ -1,0 +1,31 @@
+# Caddy reverse proxy for ScoutBase API
+# Auto-HTTPS via Let's Encrypt
+
+api.scoutbase.africa {
+    reverse_proxy localhost:8000
+
+    # Large video upload support (2GB)
+    request_body {
+        max_size 2GB
+    }
+
+    # Security headers
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Compression
+    encode gzip zstd
+
+    # Logging
+    log {
+        output file /var/log/caddy/scoutbase.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
+}
