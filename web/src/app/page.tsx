@@ -10,6 +10,7 @@ import { VideoUpload } from '@/components/VideoUpload';
 import { ComparisonView } from '@/components/ComparisonView';
 import { SAM3Panel } from '@/components/SAM3Panel';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
+import { AuthGuard } from '@/components/auth/AuthGuard';
 import {
   getPlayers,
   getLeagues,
@@ -20,6 +21,14 @@ import {
 } from '@/lib/api';
 
 export default function Home() {
+  return (
+    <AuthGuard>
+      <Dashboard />
+    </AuthGuard>
+  );
+}
+
+function Dashboard() {
   // Data state - fetched from API
   const [players, setPlayers] = useState<Player[]>([]);
   const [leagueIntel, setLeagueIntel] = useState<LeagueIntel[]>([]);

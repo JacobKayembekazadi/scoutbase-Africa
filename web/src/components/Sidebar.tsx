@@ -1,5 +1,6 @@
 import React from 'react';
-import { handleSignOut } from '@/lib/actions';
+import { signOut } from '@/lib/firebase';
+import { useAuth } from '@/components/auth/AuthProvider';
 import { COLORS } from '@/lib/constants';
 
 interface SidebarProps {
@@ -12,6 +13,7 @@ interface SidebarProps {
 }
 
 export const Sidebar = ({ activeSection, onSectionChange, shortlistCount, compareCount = 0, isOpen = true, onClose }: SidebarProps) => {
+    const { user } = useAuth();
     const items = [
         { key: "database", label: "Player Database", icon: "👤" },
         { key: "upload", label: "Upload Match", icon: "🎬" },
@@ -107,11 +109,11 @@ export const Sidebar = ({ activeSection, onSectionChange, shortlistCount, compar
 
                 <div style={{ marginTop: "auto", padding: "12px 0", borderTop: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", gap: 2 }}>
                     <div style={{ padding: "0 8px" }}>
-                        <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 2 }}>CURRENT USER</div>
-                        <div style={{ fontSize: 11, color: COLORS.textDim, fontWeight: 600 }}>scoutbase-admin</div>
+                        <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 2 }}>SIGNED IN AS</div>
+                        <div style={{ fontSize: 11, color: COLORS.textDim, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user?.displayName || user?.email || 'User'}</div>
                     </div>
                     <button
-                        onClick={() => handleSignOut()}
+                        onClick={() => signOut()}
                         style={{
                             marginTop: 8,
                             width: "100%",

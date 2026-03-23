@@ -19,7 +19,7 @@ import {
     EnhanceTracksResponse,
 } from './types';
 
-import { getAccessToken } from './supabase';
+import { getFirebaseToken } from './firebase';
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -41,10 +41,10 @@ export async function fetchWithTimeout(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    // Inject auth header
+    // Inject Firebase auth header
     const headers = new Headers(init?.headers);
     try {
-        const token = await getAccessToken();
+        const token = await getFirebaseToken();
         if (token) {
             headers.set('Authorization', `Bearer ${token}`);
         }
