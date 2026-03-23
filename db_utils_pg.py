@@ -186,7 +186,7 @@ async def insert_player(player_id: str, data: dict):
             data.get("verificationStatus", "unverified"),
             data.get("reliabilityScore", 0),
             data.get("dataConfidence", 0),
-            datetime.now().isoformat(),
+            datetime.now(),
             json.dumps(data.get("stats", {})),
             json.dumps(data.get("medical", {})),
             json.dumps(data.get("behavioral", {})),
