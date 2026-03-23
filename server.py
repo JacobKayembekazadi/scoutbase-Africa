@@ -74,6 +74,22 @@ try:
 except ImportError:
     supabase = None
     
+# ---------------------------------------------------------------------------
+# Path & Upload Constants
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+RESULTS_DIR = BASE_DIR / "results"
+DATA_DIR = BASE_DIR / "data"
+DB_PATH = DATA_DIR / "scoutbase.db"
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "2048"))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+# Ensure directories exist
+UPLOAD_DIR.mkdir(exist_ok=True)
+RESULTS_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(exist_ok=True)
+
 # Global processing semaphore (BS4)
 # Initialized in lifespan to ensure event loop binding
 processing_semaphore: asyncio.Semaphore = None
@@ -365,6 +381,8 @@ async def _save_state_async():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _save_state)
 
+
+_autosave_timer = None
 
 def _shutdown_handler(*args):
     """Graceful shutdown: save state before exit."""
