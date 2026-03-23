@@ -18,15 +18,16 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
-      - SUPABASE_DB_PASSWORD=${SUPABASE_DB_PASSWORD}
+      - SUPABASE_DB_PASSWORD=${SUPABASE_DB_PASSWORD:-}
+      - USE_POSTGRES=true
 
       # SAM3 (Modal GPU offload)
-      - SAM3_BACKEND=modal
+      - SAM3_BACKEND=${SAM3_BACKEND:-modal}
       - SAM3_DEVICE=cpu
       - SAM3_VARIANT=${SAM3_VARIANT:-base}
-      - HF_TOKEN=${HF_TOKEN}
-      - MODAL_TOKEN_ID=${MODAL_TOKEN_ID}
-      - MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - MODAL_TOKEN_ID=${MODAL_TOKEN_ID:-}
+      - MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET:-}
 
       # AI Reports
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -37,8 +38,6 @@ services:
 
       # Roboflow Inference Server
       - INFERENCE_SERVER_URL=http://inference:9001
-    depends_on:
-      - inference
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -48,7 +47,7 @@ services:
       start_period: 60s
 
   inference:
-    image: roboflow/inference:latest
+    image: roboflow/roboflow-inference-server-cpu:latest
     ports:
       - "9001:9001"
     restart: unless-stopped
