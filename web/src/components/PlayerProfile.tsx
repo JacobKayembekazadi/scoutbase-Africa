@@ -124,12 +124,12 @@ export const PlayerProfile = ({ player, onBack, onCompare, isInCompare, onToggle
             {activeTab === "overview" && (
                 <div>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 8, background: COLORS.card, borderRadius: 10, padding: 12, marginBottom: 16, border: `1px solid ${COLORS.border}` }}>
-                        <StatBlock label="Apps" value={player.stats.appearances} />
-                        <StatBlock label="Goals" value={player.stats.goals} />
-                        <StatBlock label="Assists" value={player.stats.assists} />
-                        <StatBlock label="Minutes" value={player.stats.minutes?.toLocaleString()} />
-                        <StatBlock label="Yellows" value={player.stats.cards.yellow} />
-                        <StatBlock label="Reds" value={player.stats.cards.red} />
+                        <StatBlock label="Apps" value={player.stats?.appearances ?? 0} />
+                        <StatBlock label="Goals" value={player.stats?.goals ?? 0} />
+                        <StatBlock label="Assists" value={player.stats?.assists ?? 0} />
+                        <StatBlock label="Minutes" value={player.stats?.minutes?.toLocaleString() ?? '0'} />
+                        <StatBlock label="Yellows" value={player.stats?.cards?.yellow ?? 0} />
+                        <StatBlock label="Reds" value={player.stats?.cards?.red ?? 0} />
                     </div>
 
                     <SectionTitle icon="📋">Career History</SectionTitle>

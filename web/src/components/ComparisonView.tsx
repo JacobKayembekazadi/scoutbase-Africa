@@ -172,8 +172,8 @@ export const ComparisonView = ({ players, onRemove, onViewProfile }: ComparisonV
                 <StatRow label="Goals" values={players.map(p => p.stats.goals)} />
                 <StatRow label="Assists" values={players.map(p => p.stats.assists)} />
                 <StatRow label="Minutes" values={players.map(p => p.stats.minutes)} />
-                <StatRow label="Yellow Cards" values={players.map(p => p.stats.cards.yellow)} highlight="min" />
-                <StatRow label="Red Cards" values={players.map(p => p.stats.cards.red)} highlight="min" />
+                <StatRow label="Yellow Cards" values={players.map(p => p.stats?.cards?.yellow ?? 0)} highlight="min" />
+                <StatRow label="Red Cards" values={players.map(p => p.stats?.cards?.red ?? 0)} highlight="min" />
 
                 <div style={{
                     padding: '12px 16px',
