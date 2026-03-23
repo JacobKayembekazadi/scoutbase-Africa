@@ -34,7 +34,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
       # CORS
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://scoutbase-api.vercel.app}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://scoutbase-africa.vercel.app,https://scoutbase-api.sloelabs.com}
 
       # Roboflow Inference Server
       - INFERENCE_SERVER_URL=http://inference:9001
