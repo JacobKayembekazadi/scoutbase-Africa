@@ -1,7 +1,7 @@
 'use client'
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { onAuthChange, type auth } from '@/lib/firebase'
+import { onAuthChange, auth, getRedirectResult } from '@/lib/firebase'
 import type { User } from 'firebase/auth'
 
 interface AuthContextType {
@@ -20,6 +20,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const [loading, setLoading] = useState(true)
 
     useEffect(() => {
+        // Handle redirect result after Google sign-in returns
+        getRedirectResult(auth).catch(() => {
+            // Redirect result errors are non-fatal (e.g., no redirect pending)
+        })
+
         const unsubscribe = onAuthChange((firebaseUser) => {
             setUser(firebaseUser)
             setLoading(false)

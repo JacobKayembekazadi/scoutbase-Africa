@@ -21,7 +21,12 @@ import {
 
 import { getFirebaseToken } from './firebase';
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// In production, use Vercel rewrites proxy to avoid mixed content (HTTPS→HTTP)
+// In dev, call the backend directly
+const isDev = typeof window !== 'undefined' && window.location.hostname === 'localhost';
+export const API_BASE = isDev
+    ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000')
+    : '/api/backend';
 
 // ---------------------------------------------------------------------------
 // Request Timeout — RL3-8

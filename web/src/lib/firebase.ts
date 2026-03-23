@@ -2,7 +2,8 @@ import { initializeApp, getApps } from 'firebase/app'
 import {
     getAuth,
     GoogleAuthProvider,
-    signInWithPopup,
+    signInWithRedirect,
+    getRedirectResult,
     signOut as firebaseSignOut,
     onAuthStateChanged,
     type User,
@@ -23,9 +24,11 @@ export const auth = getAuth(app)
 const googleProvider = new GoogleAuthProvider()
 
 export async function signInWithGoogle() {
-    const result = await signInWithPopup(auth, googleProvider)
-    return result.user
+    // Use redirect instead of popup to avoid COOP issues on Vercel
+    await signInWithRedirect(auth, googleProvider)
 }
+
+export { getRedirectResult }
 
 export async function signOut() {
     await firebaseSignOut(auth)
