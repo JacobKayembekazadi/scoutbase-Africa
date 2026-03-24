@@ -731,6 +731,16 @@ async def store_results_in_supabase(job_id: str, config: dict, results: dict):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/")
+async def root():
+    return {
+        "name": "ScoutBase Africa API",
+        "version": "1.0.0",
+        "status": "healthy",
+        "docs": "/docs",
+    }
+
+
 @app.get("/health")
 async def health():
     return {
