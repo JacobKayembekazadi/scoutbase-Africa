@@ -1,2 +1,3 @@
-import { handlers } from "@/auth"
-export const { GET, POST } = handlers
+// NextAuth has been removed. Auth is handled by Supabase.
+// This file is intentionally empty.
+export {}

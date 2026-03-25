@@ -3,8 +3,14 @@
 # SQLite Database Wrapper
 # ---------------------------------------------------------------------------
 import aiosqlite
+import json
+from datetime import datetime
+from pathlib import Path
 
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "scoutbase.db"
+_STATE_FILE = DATA_DIR / "state.json"  # Legacy JSON migration path
 
 async def init_db():
     """Initialize the SQLite database with schema."""

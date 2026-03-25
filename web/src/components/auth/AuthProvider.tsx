@@ -1,8 +1,8 @@
 'use client'
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { onAuthChange, auth, getRedirectResult } from '@/lib/firebase'
-import type { User } from 'firebase/auth'
+import { createClient } from '@/lib/supabase'
+import type { User } from '@supabase/supabase-js'
 
 interface AuthContextType {
     user: User | null
@@ -20,16 +20,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const [loading, setLoading] = useState(true)
 
     useEffect(() => {
-        // Handle redirect result after Google sign-in returns
-        getRedirectResult(auth).catch(() => {
-            // Redirect result errors are non-fatal (e.g., no redirect pending)
-        })
+        const supabase = createClient()
 
-        const unsubscribe = onAuthChange((firebaseUser) => {
-            setUser(firebaseUser)
+        // Get initial session
+        supabase.auth.getSession().then(({ data: { session } }) => {
+            setUser(session?.user ?? null)
             setLoading(false)
         })
-        return unsubscribe
+
+        // Listen for auth state changes (sign in / sign out / token refresh)
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+            setUser(session?.user ?? null)
+            setLoading(false)
+        })
+
+        return () => subscription.unsubscribe()
     }, [])
 
     return (

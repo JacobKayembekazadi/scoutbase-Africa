@@ -27,6 +27,9 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 from collections import defaultdict
 
+# Pose analysis and clip extraction are imported lazily to avoid
+# hard failures if optional deps (mediapipe, ffmpeg) are missing.
+
 
 class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles NumPy types."""
@@ -437,6 +440,82 @@ def process_match_video(
         print(f"    Player #{tid}: {pdata['estimated_minutes']:.1f} min, "
               f"{pdata['sprint_count']} sprints, "
               f"visibility {pdata['visibility_pct']:.0f}%")
+
+    # -----------------------------------------------------------------------
+    # Post-pipeline: Pose Analysis (MediaPipe)
+    # -----------------------------------------------------------------------
+    try:
+        from pose_analysis import analyze_match_poses
+        print("\n[Pose] Running MediaPipe pose analysis...")
+        # Build a player list that includes bboxes/frame_indices for pose analysis
+        players_for_pose = []
+        for tid, pt in player_tracks.items():
+            players_for_pose.append({
+                "track_id": tid,
+                "bboxes": pt.bboxes,
+                "frame_indices": pt.frame_indices,
+            })
+        pose_input = {"players": players_for_pose}
+        pose_results = analyze_match_poses(video_path, pose_input, sample_rate=30)
+        results_dict["pose_analysis"] = pose_results
+        print(f"[Pose] Analyzed {len(pose_results)} players")
+        # Persist updated results
+        with open(json_path, "w") as f:
+            json.dump(results_dict, f, indent=2, cls=NumpyEncoder)
+    except Exception as e:
+        results_dict["pose_analysis"] = {"error": str(e)}
+        print(f"[Pose] WARNING: Pose analysis failed: {e}")
+
+    # -----------------------------------------------------------------------
+    # Post-pipeline: Clip Extraction (FFmpeg)
+    # -----------------------------------------------------------------------
+    try:
+        from clip_extractor import extract_player_clips, create_highlight_reel, generate_thumbnail
+        print("\n[Clips] Extracting player clips...")
+        clips_dir = str(output_path / "clips")
+        # Build tracking data with bboxes/frame_indices for clip extraction
+        clip_input = {
+            "fps": fps,
+            "players": players_for_pose,  # reuse list from pose analysis
+        }
+        player_clips = extract_player_clips(video_path, clip_input, clips_dir)
+        results_dict["player_clips"] = {str(k): v for k, v in player_clips.items()}
+        print(f"[Clips] Extracted clips for {len(player_clips)} players")
+
+        # Create highlight reel
+        highlight_path = str(output_path / "highlights.mp4")
+        highlight = create_highlight_reel(video_path, {
+            "fps": fps,
+            "players": [
+                {
+                    "track_id": tid,
+                    "frame_indices": pt.frame_indices,
+                    "sprint_count": pt.sprint_count,
+                    "max_speed_px": pt.max_speed,
+                }
+                for tid, pt in player_tracks.items()
+            ]
+        }, highlight_path)
+        results_dict["highlight_reel"] = highlight
+        if highlight:
+            print(f"[Clips] Highlight reel: {highlight}")
+
+        # Generate thumbnail from annotated video (or original)
+        thumb_src = str(output_path / "annotated_output.mp4")
+        if not Path(thumb_src).exists():
+            thumb_src = video_path
+        thumb_path = str(output_path / "thumbnail.jpg")
+        thumb = generate_thumbnail(thumb_src, thumb_path)
+        results_dict["thumbnail"] = thumb
+        if thumb:
+            print(f"[Clips] Thumbnail: {thumb}")
+
+        # Persist updated results
+        with open(json_path, "w") as f:
+            json.dump(results_dict, f, indent=2, cls=NumpyEncoder)
+    except Exception as e:
+        results_dict["player_clips"] = {"error": str(e)}
+        print(f"[Clips] WARNING: Clip extraction failed: {e}")
 
     return result
 

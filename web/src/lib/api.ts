@@ -19,7 +19,7 @@ import {
     EnhanceTracksResponse,
 } from './types';
 
-import { getFirebaseToken } from './firebase';
+import { getAccessToken } from './supabase';
 
 // In production, use Vercel rewrites proxy to avoid mixed content (HTTPS→HTTP)
 // In dev, call the backend directly
@@ -46,10 +46,10 @@ export async function fetchWithTimeout(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    // Inject Firebase auth header
+    // Inject Supabase auth header
     const headers = new Headers(init?.headers);
     try {
-        const token = await getFirebaseToken();
+        const token = await getAccessToken();
         if (token) {
             headers.set('Authorization', `Bearer ${token}`);
         }

@@ -1,0 +1,33 @@
+{
+  "passed": [
+    "GET /docs",
+    "GET /health",
+    "GET /players",
+    "POST /players",
+    "PUT /players/2ce90e5a-4be7-41af-a15d-e3e7d0a125a9",
+    "POST /shortlist/{id}",
+    "GET /shortlist",
+    "GET /leagues",
+    "POST /process",
+    "GET /status/b485aa44-211",
+    "GET /results/{job_id}",
+    "GET /results/{job_id}/video",
+    "GET /results/{job_id}/tracks",
+    "GET /results/{job_id}/info",
+    "GET /results/{job_id}/frame/0",
+    "GET /results/{job_id}/csv",
+    "GET /jobs",
+    "GET /sam3/status",
+    "POST /sam3/segment",
+    "POST /sam3/teams",
+    "DELETE /shortlist/{id}"
+  ],
+  "failed": [],
+  "skipped": [
+    {
+      "test": "POST /sam3/enhance/{job_id}/tracks",
+      "detail": "Status:422: {\"detail\":[{\"type\":\"missing\",\"loc\":[\"body\"],\"msg\":\"Field required\",\"input\":null}]}"
+    }
+  ],
+  "total": 22
+}

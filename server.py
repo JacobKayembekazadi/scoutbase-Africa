@@ -101,6 +101,22 @@ def _sanitize_filename(name: str | None) -> str:
     name = _re.sub(r'[^\w\-.]', '_', name)
     return name or "video.mp4"
 
+
+def _validate_path_containment(path: Path, base_dir: Path) -> Path:
+    """Validate that a path stays within base_dir to prevent path traversal.
+    
+    Raises HTTPException(403) if path is outside base_dir.
+    Returns the resolved path if valid.
+    """
+    try:
+        resolved = path.resolve()
+        base_resolved = base_dir.resolve()
+        resolved.relative_to(base_resolved)
+        return resolved
+    except ValueError:
+        raise HTTPException(403, "Access denied: path outside allowed directory")
+
+
 # Global processing semaphore (BS4)
 # Initialized in lifespan to ensure event loop binding
 processing_semaphore: asyncio.Semaphore = None
@@ -1055,6 +1071,124 @@ async def get_player_csv(job_id: str):
         csv_path,
         media_type="text/csv",
         filename=f"scoutbase_players_{job_id}.csv",
+    )
+
+
+@app.get("/results/{job_id}/pose")
+async def get_pose_analysis(job_id: str):
+    """Get MediaPipe pose analysis data for a completed job."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+
+    job = jobs[job_id]
+    if job["status"] != "completed":
+        raise HTTPException(400, "Processing not yet complete")
+
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
+
+    results_path = Path(job["results_path"]) / "tracking_results.json"
+    if not results_path.exists():
+        raise HTTPException(500, "Results file not found")
+
+    with open(results_path) as f:
+        results = json.load(f)
+
+    pose_data = results.get("pose_analysis")
+    if pose_data is None:
+        raise HTTPException(404, "Pose analysis not available for this job")
+
+    return {"job_id": job_id, "pose_analysis": pose_data}
+
+
+@app.get("/results/{job_id}/clips/{track_id}")
+async def get_player_clips(job_id: str, track_id: int):
+    """Get list of video clip paths for a specific player track."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+
+    job = jobs[job_id]
+    if job["status"] != "completed":
+        raise HTTPException(400, "Processing not yet complete")
+
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
+
+    results_path = Path(job["results_path"]) / "tracking_results.json"
+    if not results_path.exists():
+        raise HTTPException(500, "Results file not found")
+
+    with open(results_path) as f:
+        results = json.load(f)
+
+    player_clips = results.get("player_clips", {})
+    if isinstance(player_clips, dict) and "error" in player_clips:
+        raise HTTPException(500, f"Clip extraction failed: {player_clips['error']}")
+
+    track_key = str(track_id)
+    clips = player_clips.get(track_key, [])
+    if not clips:
+        raise HTTPException(404, f"No clips found for track #{track_id}")
+
+    return {
+        "job_id": job_id,
+        "track_id": track_id,
+        "clips": clips,
+        "count": len(clips),
+    }
+
+
+@app.get("/results/{job_id}/highlights")
+async def get_highlight_reel(job_id: str):
+    """Download the highlight reel video for a completed job."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+
+    job = jobs[job_id]
+    if job["status"] != "completed":
+        raise HTTPException(400, "Processing not yet complete")
+
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
+
+    # RL4-5: Validate path stays within RESULTS_DIR
+    highlight_path = _validate_path_containment(
+        Path(job["results_path"]) / "highlights.mp4", RESULTS_DIR
+    )
+    if not highlight_path.exists():
+        raise HTTPException(404, "Highlight reel not available for this job")
+
+    return FileResponse(
+        highlight_path,
+        media_type="video/mp4",
+        filename=f"scoutbase_highlights_{job_id}.mp4",
+    )
+
+
+@app.get("/results/{job_id}/thumbnail")
+async def get_thumbnail(job_id: str):
+    """Get the thumbnail image for a completed job."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+
+    job = jobs[job_id]
+    if job["status"] != "completed":
+        raise HTTPException(400, "Processing not yet complete")
+
+    if not job.get("results_path"):
+        raise HTTPException(500, "Results path not available for this job")
+
+    # RL4-5: Validate path stays within RESULTS_DIR
+    thumb_path = _validate_path_containment(
+        Path(job["results_path"]) / "thumbnail.jpg", RESULTS_DIR
+    )
+    if not thumb_path.exists():
+        raise HTTPException(404, "Thumbnail not available for this job")
+
+    return FileResponse(
+        thumb_path,
+        media_type="image/jpeg",
+        filename=f"scoutbase_thumb_{job_id}.jpg",
     )
 
 

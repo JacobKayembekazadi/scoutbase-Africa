@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { signInWithGoogle } from '@/lib/firebase'
+import { createClient } from '@/lib/supabase'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { COLORS } from '@/lib/constants'
 import { useRouter } from 'next/navigation'
@@ -12,15 +12,25 @@ export default function LoginForm() {
     const { user } = useAuth()
     const router = useRouter()
 
-    // If user is already signed in (e.g., returning from redirect), go to dashboard
+    // If user is already signed in (e.g., returning from OAuth redirect), go to dashboard
     useEffect(() => {
         if (user) router.push('/')
     }, [user, router])
 
-    function handleGoogleSignIn() {
+    async function handleGoogleSignIn() {
         setLoading(true)
-        // signInWithRedirect navigates away — no need for try/catch
-        signInWithGoogle()
+        const supabase = createClient()
+        const { error } = await supabase.auth.signInWithOAuth({
+            provider: 'google',
+            options: {
+                redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+            },
+        })
+        if (error) {
+            console.error('Login error:', error)
+            setLoading(false)
+        }
+        // On success, Supabase redirects the browser — no further action needed
     }
 
     return (
